@@ -1033,13 +1033,29 @@ async fn test_tower_lsp_goto_definition_on_an_interface_member() {
     }
 
     // `i.Go()` — an interface-typed receiver. `Go` starts at col 17.
-    let Some(GotoDefinitionResponse::Scalar(loc)) = goto(backend, &main_uri, 1, 18).await else {
-        panic!("goto_definition on `i.Go()` must resolve to the interface method");
+    //
+    // B104 CHANGED THIS CONTRACT at the protocol level: it used to be a
+    // `Scalar` naming only the interface method. The interface declaration
+    // is still the FIRST answer — that half is unchanged and still pinned —
+    // but `C`'s implementation now follows it, so the handler returns an
+    // `Array` and the editor opens a peek list.
+    let Some(GotoDefinitionResponse::Array(locs)) = goto(backend, &main_uri, 1, 18).await else {
+        panic!(
+            "goto_definition on `i.Go()` must offer the interface method and its implementations"
+        );
     };
-    assert_eq!(loc.uri, iface_uri, "must jump to the interface's file");
-    assert_eq!(loc.range.start.line, 0);
+    assert_eq!(locs.len(), 2, "interface declaration plus one implementer");
+    assert_eq!(locs[0].uri, iface_uri, "the declaration must lead");
+    assert_eq!(locs[0].range.start.line, 0);
+    assert_eq!(
+        locs[1].uri, main_uri,
+        "C::Go, the implementation, must follow it"
+    );
+    assert_eq!(locs[1].range.start.line, 0);
 
-    // `c.Go()` — the class-typed twin, in the requesting file.
+    // `c.Go()` — the class-typed twin, in the requesting file. Nothing
+    // extends `C`, so this stays a single precise target: B104 must not
+    // turn every call into a peek list.
     let Some(GotoDefinitionResponse::Scalar(loc)) = goto(backend, &main_uri, 2, 18).await else {
         panic!("goto_definition on `c.Go()` must resolve to the class method");
     };

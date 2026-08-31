@@ -1872,6 +1872,120 @@ impl<'a> GlobalScope<'a> {
         out
     }
 
+    /// Workspace types that reach `type_name` through their transitive
+    /// base/interface chain AND declare `member` themselves — the workspace
+    /// CLASS implementations and overrides of a method the receiver's static
+    /// type declares (B104). Derived interfaces are declarations, not runtime
+    /// implementations, and are deliberately excluded.
+    ///
+    /// The pool carries no reverse (base → derived) index, so the question
+    /// is asked forwards of every workspace class and interface. Two traps
+    /// this has to step around:
+    ///
+    /// * [`SymbolTable::all_symbols`] iterates a `HashMap`, so callers must
+    ///   not use this result's iteration order as workspace order. Navigation
+    ///   sorts resolved locations by URI, because snapshot-local file ids are
+    ///   not stable when open documents originate in a concurrent map.
+    /// * [`Self::workspace_class_parents`] returns parent names AS WRITTEN,
+    ///   so `class C : I` inside `namespace N` yields `"I"`. Every link is
+    ///   normalized in its own class's context before comparison, or
+    ///   namespaced implementers are silently missed.
+    ///
+    /// Each implementing class contributes its EFFECTIVE class definition.
+    /// That may be inherited from a separate class branch (`C : Base, I`), in
+    /// which case navigation lands on `Base::member`, never on C's class body.
+    /// Locations are deduplicated because several implementers may inherit the
+    /// same definition.
+    pub fn workspace_member_implementations(&self, type_name: &str, member: &str) -> Vec<&Symbol> {
+        let target = self.normalize_workspace_class_name(type_name);
+        let mut candidates: Vec<String> = self
+            .workspace()
+            .all_symbols()
+            .filter(|s| matches!(s.kind, SymbolKind::Class { .. }))
+            .map(|s| s.name.clone())
+            .collect();
+        candidates.sort();
+        candidates.dedup();
+
+        let mut out: Vec<&Symbol> = Vec::new();
+        let mut seen: std::collections::HashSet<(usize, u32, u32)> =
+            std::collections::HashSet::new();
+        for candidate in candidates {
+            if candidate == target || !self.workspace_type_has_ancestor(&candidate, &target) {
+                continue;
+            }
+            for sym in self.lookup_effective_class_member_symbols(&candidate, member) {
+                if seen.insert((sym.file_id, sym.span.start, sym.span.end)) {
+                    out.push(sym);
+                }
+            }
+        }
+        out
+    }
+
+    /// Function definitions that are effective for `class_name`, walking only
+    /// concrete class ancestry. Interface declarations are deliberately
+    /// skipped: in `class C : I, Base`, I appearing first must not hide the
+    /// actual inherited implementation on Base.
+    fn lookup_effective_class_member_symbols(
+        &self,
+        class_name: &str,
+        member: &str,
+    ) -> Vec<&Symbol> {
+        let mut out = Vec::new();
+        let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut queue =
+            std::collections::VecDeque::from([self.normalize_workspace_class_name(class_name)]);
+
+        while let Some(name) = queue.pop_front() {
+            if !visited.insert(name.clone()) || !self.is_workspace_class(&name) {
+                continue;
+            }
+            for sym in self.lookup_workspace(&format!("{}::{}", name, member)) {
+                let SymbolKind::Function { params, .. } = &sym.kind else {
+                    continue;
+                };
+                let types: Vec<String> = params.iter().map(|(_, ty)| ty.clone()).collect();
+                if claimed.insert(override_key(&types)) {
+                    out.push(sym);
+                }
+            }
+            for parent in self.workspace_class_parents(&name) {
+                let resolved = self.normalize_workspace_class_name_in_context(&parent, &name);
+                if self.is_workspace_class(&resolved) {
+                    queue.push_back(resolved);
+                }
+            }
+        }
+        out
+    }
+
+    /// True when `target` is in `type_name`'s transitive base/interface
+    /// chain. Cycle-guarded and depth-capped like the other inheritance
+    /// walks here.
+    fn workspace_type_has_ancestor(&self, type_name: &str, target: &str) -> bool {
+        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut queue =
+            std::collections::VecDeque::from([self.normalize_workspace_class_name(type_name)]);
+        while let Some(name) = queue.pop_front() {
+            if visited.len() > 256 {
+                break;
+            }
+            if !visited.insert(name.clone()) {
+                continue;
+            }
+            for parent in self.workspace_class_parents(&name) {
+                let resolved = self.normalize_workspace_class_name_in_context(&parent, &name);
+                if resolved == target {
+                    return true;
+                }
+                queue.push_back(resolved);
+            }
+        }
+        false
+    }
+
     /// All members (fields + methods, typed) declared on `class_name`
     /// itself — NOT walking parents. Each method appears with its return
     /// type as the member type (same approximation the checker uses for

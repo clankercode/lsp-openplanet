@@ -322,7 +322,7 @@ mod tests {
 
     #[test]
     fn complete_walk_adds_all_declaration_parameter_defaults_without_broadening_call_hierarchy() {
-        let source = "void free(uint value = (a = 1)) {}\nclass C {\n    C(uint value = (b = 2)) {}\n    void method(uint value = (c = 3)) {}\n}\ninterface I { void method(uint value = (d = 4)); }\nfuncdef void Callback(uint value = (e = 5));\nimport void Remote(uint value = (f = 6)) from 'M';\n";
+        let source = "void free(uint value = (a = 1)) {}\nclass C {\n    C(uint value = (b = 2)) {}\n    void method(uint value = (c = 3)) {}\n}\ninterface I { void method(uint value = (d = 4)); }\nfuncdef void Callback(uint value = (e = 5));\nimport void Remote(uint value = (f = 6)) from 'M';\nvoid holder() { Map(arr, function(uint value = (g = 7)) {}); }\n";
         let (file, errors) = crate::parser::parser::parse(source);
         assert!(errors.is_empty(), "parse errors: {errors:?}");
 
@@ -340,8 +340,8 @@ mod tests {
             complete_assigns += usize::from(matches!(expr.kind, ExprKind::Assign { .. }));
         });
         assert_eq!(
-            complete_assigns, 6,
-            "free, constructor, method, interface, funcdef, and import defaults must be visited"
+            complete_assigns, 7,
+            "free, constructor, method, interface, funcdef, import, and lambda defaults must be visited"
         );
     }
 }

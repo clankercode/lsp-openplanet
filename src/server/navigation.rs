@@ -25,6 +25,7 @@ use crate::lexer::TokenKind;
 use crate::server::diagnostics::{position_to_offset, span_to_range};
 use crate::symbols::scope::{Symbol, SymbolKind};
 use crate::typecheck::access_position::{access_position_at, AccessPosition};
+use crate::typecheck::call_site::arity_admits;
 use crate::typecheck::global_scope::qualified_virtual_name;
 use crate::typecheck::repr::TypeRepr;
 use crate::typecheck::GlobalScope;
@@ -110,21 +111,37 @@ pub fn goto_definition(
         if let Some(owner) = receiver_type_name(analysis, checked, tok_idx, tok_span.start) {
             let members = scope.lookup_member_symbols_with_inheritance(&owner, &qual);
             if !members.is_empty() {
-                return prefer_definition(&members)
-                    .and_then(|sym| symbol_location(sym, files))
-                    .into_iter()
-                    .collect();
+                return member_targets(scope, &owner, &qual, &members, analysis, tok_span, files);
             }
             // B103: no member is spelled `qual`, but the type may still
             // declare it as a VIRTUAL PROPERTY — a `get_`/`set_` pair. The
             // exact lookup above runs first so a real field named `ID`
             // always beats an accessor named for it.
             let position = access_position_at(&analysis.file, tok_span);
-            return scope
-                .lookup_virtual_property_accessor_symbols(&owner, &qual, position)
-                .into_iter()
-                .filter_map(|sym| symbol_location(sym, files))
-                .collect();
+            let accessors = scope.lookup_virtual_property_accessor_symbols(&owner, &qual, position);
+            // B103 + B104: an accessor declared on an interface has
+            // implementations too. Each accessor keeps its own
+            // implementations directly after it, so a compound assign still
+            // reads as get-then-its-impls, set-then-its-impls.
+            let mut out: Vec<Location> = Vec::new();
+            for accessor in accessors {
+                let accessor_name = accessor
+                    .name
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or(&accessor.name)
+                    .to_string();
+                for loc in declaration_with_implementations(
+                    accessor,
+                    &scope.workspace_member_implementations(&owner, &accessor_name),
+                    files,
+                ) {
+                    if !out.contains(&loc) {
+                        out.push(loc);
+                    }
+                }
+            }
+            return out;
         }
     }
     // B103, the namespace/global half. Each lexical namespace level is an
@@ -137,20 +154,26 @@ pub fn goto_definition(
     // is the over-reach B054 removed from this ladder.
     if !is_member_access(analysis, tok_idx) {
         let position = access_position_at(&analysis.file, tok_span);
-        if let Some(symbols) =
-            lookup_workspace_property_site(scope, analysis, &qual, tok_span.start, position)
-        {
-            return symbols
-                .into_iter()
-                .filter_map(|sym| symbol_location(sym, files))
-                .collect();
+        match lookup_workspace_property_site(scope, analysis, &qual, tok_span.start, position) {
+            Some(PropertySite::Accessors(accessors)) => {
+                return accessors
+                    .into_iter()
+                    .filter_map(|sym| symbol_location(sym, files))
+                    .collect();
+            }
+            Some(PropertySite::Ordinary(ordinary)) if !ordinary.is_empty() => {
+                return overload_targets(&ordinary, analysis, tok_span, files);
+            }
+            Some(PropertySite::Ordinary(_)) => return Vec::new(),
+            None => {}
         }
         if qual.contains("::") {
             return Vec::new();
         }
     }
-    if let Some(sym) = lookup_workspace_symbol(scope, analysis, &qual, tok_span.start) {
-        return symbol_location(sym, files).into_iter().collect();
+    let by_name = lookup_workspace_symbols(scope, analysis, &qual, tok_span.start);
+    if !by_name.is_empty() {
+        return overload_targets(&by_name, analysis, tok_span, files);
     }
 
     // Member fallback: only for unqualified names (no `::` — `Ns::F` never
@@ -173,10 +196,9 @@ pub fn goto_definition(
         return Vec::new();
     };
     let members = scope.lookup_member_symbols_with_inheritance(&enclosing, &qual);
-    prefer_definition(&members)
-        .and_then(|sym| symbol_location(sym, files))
-        .into_iter()
-        .collect()
+    member_targets(
+        scope, &enclosing, &qual, &members, analysis, tok_span, files,
+    )
 }
 
 // === receiver.member support (shared with hover) ======================
@@ -506,7 +528,7 @@ fn lookup_workspace_property_site<'a>(
     name: &str,
     use_offset: u32,
     position: AccessPosition,
-) -> Option<Vec<&'a Symbol>> {
+) -> Option<PropertySite<'a>> {
     let explicitly_qualified = name.contains("::");
     let mut candidates = Vec::new();
     let source = analysis.masked_source();
@@ -518,8 +540,8 @@ fn lookup_workspace_property_site<'a>(
 
     for qualified in candidates {
         let ordinary = scope.lookup_workspace(&qualified);
-        if let Some(symbol) = prefer_definition(&ordinary) {
-            return Some(vec![symbol]);
+        if prefer_definition(&ordinary).is_some() {
+            return Some(PropertySite::Ordinary(ordinary));
         }
         let has_property = ["get_", "set_"].into_iter().any(|prefix| {
             lookup_exact_workspace_function(scope, &qualified_virtual_name(&qualified, prefix))
@@ -532,9 +554,22 @@ fn lookup_workspace_property_site<'a>(
         // A property at this lexical level owns the spelling even when the
         // requested access mode has no usable accessor (for example, reading
         // a setter-only property). Do not widen that miss to an outer scope.
-        return Some(accessors);
+        return Some(PropertySite::Accessors(accessors));
     }
-    explicitly_qualified.then(Vec::new)
+    explicitly_qualified.then(|| PropertySite::Ordinary(Vec::new()))
+}
+
+/// Which kind of thing a workspace-level site resolved to.
+///
+/// The distinction matters at the call site and nowhere else: an ORDINARY
+/// declaration may be one of several overloads, so it still has to go
+/// through [`overload_targets`] (B104), whereas ACCESSORS have already been
+/// selected by access position and must be emitted as-is — running overload
+/// narrowing over them would collapse a compound assign's `get_`+`set_`
+/// pair back into a single target.
+enum PropertySite<'a> {
+    Ordinary(Vec<&'a Symbol>),
+    Accessors(Vec<&'a Symbol>),
 }
 
 /// Select an exact workspace FUNCTION, preferring a definition over an import.
@@ -582,6 +617,218 @@ fn lookup_exact_workspace_property_accessors<'a>(
         }
     }
     out
+}
+
+/// Argument count of the call whose callee is the identifier spanning
+/// `name_span`; `None` when the site is not a call callee.
+///
+/// Read off the AST rather than the token stream so nesting, string
+/// literals and comments are handled for free — the same reason
+/// `call_hierarchy` walks expressions to find the enclosing call.
+fn call_argc_at(
+    file: &crate::parser::ast::SourceFile,
+    name_span: crate::lexer::Span,
+) -> Option<usize> {
+    let mut found = None;
+    crate::parser::walk::walk_file_exprs_complete(file, &mut |expr: &crate::parser::ast::Expr| {
+        let crate::parser::ast::ExprKind::Call { callee, args } = &expr.kind else {
+            return;
+        };
+        let callee_span = match &callee.kind {
+            crate::parser::ast::ExprKind::Ident(id) => Some(id.span),
+            crate::parser::ast::ExprKind::Member { member, .. } => Some(member.span),
+            crate::parser::ast::ExprKind::NamespaceAccess { path } => {
+                path.segments.last().map(|s| s.span)
+            }
+            _ => None,
+        };
+        if callee_span.is_some_and(|s| s.start == name_span.start && s.end == name_span.end) {
+            found = Some(args.len());
+        }
+    });
+    found
+}
+
+/// One target when the site names a single definition or the call site
+/// narrows an overload set to one signature; every overload when it cannot
+/// (B104).
+///
+/// `unique_overload_for_argc` answers `None` for BOTH "no signature takes
+/// this many arguments" and "several do". Neither lets us honestly claim
+/// one target, so both list the whole set — which is also why a call site
+/// that DOES narrow keeps its single precise answer, the regression this
+/// must not cause.
+fn overload_targets(
+    candidates: &[&Symbol],
+    analysis: &DocumentAnalysis,
+    tok_span: crate::lexer::Span,
+    files: &WorkspaceFiles,
+) -> Vec<Location> {
+    let functions: Vec<&Symbol> = candidates
+        .iter()
+        .copied()
+        .filter(|s| matches!(s.kind, SymbolKind::Function { .. }) && !s.is_import_alias())
+        .collect();
+    if functions.len() > 1 {
+        if let Some(argc) = call_argc_at(&analysis.file, tok_span) {
+            let mut matching = functions.iter().filter(|s| match &s.kind {
+                SymbolKind::Function {
+                    params, min_args, ..
+                } => arity_admits(*min_args, params.len(), argc),
+                _ => false,
+            });
+            let unique = matching.next().filter(|_| matching.next().is_none());
+            match unique {
+                Some(sym) => return symbol_location(sym, files).into_iter().collect(),
+                None => return symbols_in_workspace_order(functions, files),
+            }
+        }
+    }
+    prefer_definition(candidates)
+        .and_then(|s| symbol_location(s, files))
+        .into_iter()
+        .collect()
+}
+
+/// Resolve a method/member against the receiver's static type, applying the
+/// same arity rule as free-function overload navigation (B104).
+///
+/// A call that narrows a genuine overload set to exactly one declaration uses
+/// that declaration, but still includes its implementations/overrides — the
+/// receiver union is independent of overload precision. With several or zero
+/// arity matches, arity cannot justify picking one, so every static overload is
+/// shown. Each declaration is immediately followed by implementations of THAT
+/// signature.
+fn member_targets(
+    scope: &GlobalScope<'_>,
+    owner: &str,
+    member: &str,
+    candidates: &[&Symbol],
+    analysis: &DocumentAnalysis,
+    tok_span: crate::lexer::Span,
+    files: &WorkspaceFiles,
+) -> Vec<Location> {
+    let functions: Vec<&Symbol> = candidates
+        .iter()
+        .copied()
+        .filter(|s| matches!(s.kind, SymbolKind::Function { .. }) && !s.is_import_alias())
+        .collect();
+
+    let declarations = if functions.len() > 1 {
+        if let Some(argc) = call_argc_at(&analysis.file, tok_span) {
+            let matching: Vec<&Symbol> = functions
+                .iter()
+                .copied()
+                .filter(|s| match &s.kind {
+                    SymbolKind::Function {
+                        params, min_args, ..
+                    } => arity_admits(*min_args, params.len(), argc),
+                    _ => false,
+                })
+                .collect();
+            if matching.len() == 1 {
+                matching
+            } else {
+                functions
+            }
+        } else {
+            prefer_definition(candidates).into_iter().collect()
+        }
+    } else {
+        prefer_definition(candidates).into_iter().collect()
+    };
+
+    let implementations = scope.workspace_member_implementations(owner, member);
+    let mut out = Vec::new();
+    for declaration in declarations {
+        for location in declaration_with_implementations(declaration, &implementations, files) {
+            if !out.contains(&location) {
+                out.push(location);
+            }
+        }
+    }
+    out
+}
+
+/// The declaration first, then implementations/overrides with the same
+/// parameter signature, ordered by workspace URI rather than snapshot-local
+/// file id. Symbols whose file is not open are dropped.
+///
+/// The declaration leads because it is what the receiver's STATIC type
+/// guarantees — the one answer that is certainly correct. The
+/// implementations are suggestions layered after it, which is why an
+/// incomplete dependency closure is tolerable here in a way it would not
+/// be for a diagnostic: a missing entry costs a peek-list row, not a false
+/// error.
+fn declaration_with_implementations(
+    declaration: &Symbol,
+    implementations: &[&Symbol],
+    files: &WorkspaceFiles,
+) -> Vec<Location> {
+    let mut out = symbol_location(declaration, files)
+        .into_iter()
+        .collect::<Vec<_>>();
+    let matching = implementations
+        .iter()
+        .copied()
+        .filter(|implementation| same_function_signature(declaration, implementation));
+    for location in symbols_in_workspace_order(matching, files) {
+        if !out.contains(&location) {
+            out.push(location);
+        }
+    }
+    out
+}
+
+fn same_function_signature(left: &Symbol, right: &Symbol) -> bool {
+    let (
+        SymbolKind::Function {
+            return_type: left_return,
+            params: left_params,
+            ..
+        },
+        SymbolKind::Function {
+            return_type: right_return,
+            params: right_params,
+            ..
+        },
+    ) = (&left.kind, &right.kind)
+    else {
+        return false;
+    };
+    same_type_spelling(left_return, right_return)
+        && left_params.len() == right_params.len()
+        && left_params
+            .iter()
+            .zip(right_params)
+            .all(|((_, left), (_, right))| same_type_spelling(left, right))
+}
+
+fn same_type_spelling(left: &str, right: &str) -> bool {
+    left.chars()
+        .filter(|c| !c.is_whitespace())
+        .eq(right.chars().filter(|c| !c.is_whitespace()))
+}
+
+fn symbols_in_workspace_order<'s>(
+    symbols: impl IntoIterator<Item = &'s Symbol>,
+    files: &WorkspaceFiles,
+) -> Vec<Location> {
+    let mut locations: Vec<Location> = symbols
+        .into_iter()
+        .filter_map(|symbol| symbol_location(symbol, files))
+        .collect();
+    locations.sort_by(|left, right| {
+        left.uri
+            .as_str()
+            .cmp(right.uri.as_str())
+            .then_with(|| left.range.start.line.cmp(&right.range.start.line))
+            .then_with(|| left.range.start.character.cmp(&right.range.start.character))
+            .then_with(|| left.range.end.line.cmp(&right.range.end.line))
+            .then_with(|| left.range.end.character.cmp(&right.range.end.character))
+    });
+    locations.dedup();
+    locations
 }
 
 /// Pick the best candidate from a `lookup_reference` result: a real
@@ -973,10 +1220,16 @@ mod tests {
         let src =
             "interface I { void Go(); }\nclass C : I { void Go() {} }\nvoid f(I@ i) { i.Go(); }\n";
         let tw = build_single_file_workspace("file:///t/a.as", src);
-        let loc = goto_at(&tw, 0, 2, "i.Go", 2).expect("i.Go() must resolve to I::Go");
+        // B104 CHANGED THIS CONTRACT. It used to assert the interface
+        // declaration was the ONLY answer ("not the class implementation").
+        // The declaration still comes FIRST — that part is unchanged and
+        // still pinned — but the implementations now follow it instead of
+        // being suppressed.
+        let locs = goto_all(&tw, 0, 2, "i.Go", 2);
         assert_eq!(
-            loc.range.start.line, 0,
-            "must land on the interface declaration, not the class implementation"
+            lines_of(&locs),
+            vec![0, 1],
+            "the interface declaration must lead, with C::Go after it, got {locs:?}"
         );
     }
 
@@ -1482,6 +1735,361 @@ mod tests {
             locs.is_empty(),
             "a property the class does not declare must not fall through to the \
              same-named free accessor, got {locs:?}"
+        );
+    }
+
+    // === B104: every implementation, not one location =====================
+    //
+    // A method reached through an interface- or base-typed receiver has
+    // more than one honest answer: the declaration the static type owns,
+    // and each workspace class that implements or overrides it. Definition
+    // returns them all, declaration FIRST, implementations after in
+    // workspace file order (deterministic, so it can be pinned here).
+    //
+    // The single-target contract is NOT relaxed generally: `goto_at` below
+    // asserts exactly one answer, and every precise-navigation test still
+    // uses it.
+
+    #[test]
+    fn goto_definition_interface_method_lists_its_one_implementer_after_the_interface() {
+        let src =
+            "interface I { void Go(); }\nclass C : I { void Go() {} }\nvoid f(I@ i) { i.Go(); }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let locs = goto_all(&tw, 0, 2, "i.Go", 2);
+        assert_eq!(
+            lines_of(&locs),
+            vec![0, 1],
+            "interface declaration first, then the implementation, got {locs:?}"
+        );
+    }
+
+    #[test]
+    fn goto_definition_interface_method_lists_several_implementers_in_file_order() {
+        let src = "interface I { void Go(); }\nclass A : I { void Go() {} }\nclass B : I { void Go() {} }\nvoid f(I@ i) { i.Go(); }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let locs = goto_all(&tw, 0, 3, "i.Go", 2);
+        assert_eq!(
+            lines_of(&locs),
+            vec![0, 1, 2],
+            "must list I::Go, then A::Go, then B::Go in declaration order, got {locs:?}"
+        );
+    }
+
+    #[test]
+    fn goto_definition_interface_method_with_no_implementer_stays_a_single_target() {
+        // Zero implementers: the interface declaration is the only answer,
+        // and it must NOT be wrapped into a list of one oddity — `goto_at`
+        // asserts exactly one.
+        let src = "interface I { void Go(); }\nvoid f(I@ i) { i.Go(); }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let loc = goto_at(&tw, 0, 1, "i.Go", 2).expect("must resolve");
+        assert_eq!(loc.range.start.line, 0);
+    }
+
+    #[test]
+    fn goto_definition_implementers_are_listed_in_workspace_file_order() {
+        // Ordering across files must be deterministic. The symbol pool is a
+        // hash map, so this fails intermittently if the implementation does
+        // not sort.
+        let tw = crate::server::test_support::TestWorkspace::files(&[
+            ("a_iface", "interface I { void Go(); }\n"),
+            ("b_first", "class B1 : I { void Go() {} }\n"),
+            ("c_second", "class C2 : I { void Go() {} }\n"),
+            ("d_use", "void f(I@ i) { i.Go(); }\n"),
+        ]);
+        let locs = goto_all(&tw, 3, 0, "i.Go", 2);
+        let uris: Vec<_> = locs.iter().map(|l| l.uri.clone()).collect();
+        assert_eq!(
+            uris,
+            vec![tw.uri_of(0), tw.uri_of(1), tw.uri_of(2)],
+            "declaration file first, then implementers in file order, got {locs:?}"
+        );
+    }
+
+    #[test]
+    fn goto_definition_diamond_two_interfaces_sharing_a_method_name() {
+        // `C` implements both `A` and `B`, which both declare `Go`. Through
+        // an `A@` receiver the answer is A::Go plus C's implementation —
+        // B::Go is NOT an answer, it is a different declaration.
+        let src = "interface A { void Go(); }\ninterface B { void Go(); }\nclass C : A, B { void Go() {} }\nvoid f(A@ a) { a.Go(); }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let locs = goto_all(&tw, 0, 3, "a.Go", 2);
+        assert_eq!(
+            lines_of(&locs),
+            vec![0, 2],
+            "must be A::Go then C::Go, never B::Go (line 1), got {locs:?}"
+        );
+    }
+
+    #[test]
+    fn goto_definition_override_chain_lists_base_then_both_derived() {
+        let src = "class Base { void Go() {} }\nclass D1 : Base { void Go() {} }\nclass D2 : Base { void Go() {} }\nvoid f(Base@ b) { b.Go(); }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let locs = goto_all(&tw, 0, 3, "b.Go", 2);
+        assert_eq!(
+            lines_of(&locs),
+            vec![0, 1, 2],
+            "base declaration then each override, got {locs:?}"
+        );
+    }
+
+    #[test]
+    fn goto_definition_transitive_override_is_listed() {
+        // D2 derives from D1 derives from Base. A `Base@` receiver must
+        // reach the grandchild override too — the walk is transitive.
+        let src = "class Base { void Go() {} }\nclass D1 : Base { void Go() {} }\nclass D2 : D1 { void Go() {} }\nvoid f(Base@ b) { b.Go(); }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let locs = goto_all(&tw, 0, 3, "b.Go", 2);
+        assert_eq!(lines_of(&locs), vec![0, 1, 2], "got {locs:?}");
+    }
+
+    #[test]
+    fn goto_definition_a_derived_class_that_does_not_override_is_not_listed() {
+        // `D` inherits `Go` without redeclaring it, so it has no `Go`
+        // definition of its own to jump to. Listing it would send the user
+        // to a class body with nothing in it.
+        let src = "class Base { void Go() {} }\nclass D : Base {}\nvoid f(Base@ b) { b.Go(); }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let loc = goto_at(&tw, 0, 2, "b.Go", 2).expect("must resolve");
+        assert_eq!(loc.range.start.line, 0, "only Base::Go declares Go");
+    }
+
+    #[test]
+    fn goto_definition_class_typed_receiver_still_lists_its_own_overrides() {
+        // The rule is about the receiver's STATIC type, not about
+        // interfaces specifically: a concrete base works the same way.
+        let src =
+            "class C { void Go() {} }\nclass Sub : C { void Go() {} }\nvoid f(C@ c) { c.Go(); }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let locs = goto_all(&tw, 0, 2, "c.Go", 2);
+        assert_eq!(lines_of(&locs), vec![0, 1], "got {locs:?}");
+    }
+
+    /// NEGATIVE CONTROL: a leaf type nobody extends keeps exactly one
+    /// precise target. This is the regression B104 must not cause.
+    #[test]
+    fn goto_definition_leaf_class_method_keeps_a_single_precise_target() {
+        let src =
+            "interface I { void Go(); }\nclass C : I { void Go() {} }\nvoid f(C@ c) { c.Go(); }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let loc = goto_at(&tw, 0, 2, "c.Go", 2).expect("must resolve");
+        assert_eq!(
+            loc.range.start.line, 1,
+            "nothing extends C, so C::Go is the only answer"
+        );
+    }
+
+    /// B103 + B104 together: an interface declares the ACCESSOR, classes
+    /// implement it, and a property read through the interface offers the
+    /// interface's getter first and each implementation after.
+    #[test]
+    fn goto_definition_interface_declared_accessor_lists_implementations() {
+        let src = "interface I { uint get_ID(); }\nclass C : I { uint get_ID() { return 1; } }\nvoid f(I@ i) { uint x = i.ID; }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let locs = goto_all(&tw, 0, 2, "i.ID", 2);
+        assert_eq!(
+            lines_of(&locs),
+            vec![0, 1],
+            "I::get_ID then C::get_ID, got {locs:?}"
+        );
+    }
+
+    // === B104: overload sets ==============================================
+
+    /// NEGATIVE CONTROL: a call site whose argument count narrows the
+    /// overload set to exactly one signature keeps its single precise
+    /// target. Regressing this would make every ordinary call ambiguous.
+    #[test]
+    fn goto_definition_resolvable_overload_keeps_a_single_target() {
+        let src = "void F() {}\nvoid F(int a) {}\nvoid F(int a, int b) {}\nvoid main() { F(1); }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let loc = goto_at(&tw, 0, 3, "F(1)", 0).expect("F(1) must resolve");
+        assert_eq!(
+            loc.range.start.line, 1,
+            "one argument narrows to the single-parameter overload"
+        );
+    }
+
+    #[test]
+    fn goto_definition_unresolvable_overload_lists_every_overload() {
+        // Two overloads both accept one argument, so the call site cannot
+        // be narrowed — every candidate is a legitimate target.
+        let src = "void F(int a) {}\nvoid F(float a) {}\nvoid main() { F(1); }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let locs = goto_all(&tw, 0, 2, "F(1)", 0);
+        assert_eq!(
+            lines_of(&locs),
+            vec![0, 1],
+            "an unnarrowable call must offer both overloads, got {locs:?}"
+        );
+    }
+
+    #[test]
+    fn goto_definition_overload_with_no_matching_arity_lists_every_overload() {
+        // No signature takes three arguments. `unique_overload_for_argc`
+        // answers `None` for zero-match exactly as it does for multi-match,
+        // and neither lets us claim one target honestly.
+        let src = "void F(int a) {}\nvoid F(int a, int b) {}\nvoid main() { F(1, 2, 3); }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let locs = goto_all(&tw, 0, 2, "F(1", 0);
+        assert_eq!(lines_of(&locs), vec![0, 1], "got {locs:?}");
+    }
+
+    #[test]
+    fn goto_definition_overloads_are_listed_in_workspace_file_order() {
+        let tw = crate::server::test_support::TestWorkspace::files(&[
+            ("a_one", "void F(int a) {}\n"),
+            ("b_two", "void F(float a) {}\n"),
+            ("c_use", "void main() { F(1); }\n"),
+        ]);
+        let locs = goto_all(&tw, 2, 0, "F(1)", 0);
+        let uris: Vec<_> = locs.iter().map(|l| l.uri.clone()).collect();
+        assert_eq!(
+            uris,
+            vec![tw.uri_of(0), tw.uri_of(1)],
+            "overloads must be listed in workspace file order, got {locs:?}"
+        );
+    }
+
+    /// A non-call reference to an overloaded name (a function-pointer
+    /// decay, `startnew(Worker)`) has no argument list to narrow with, so
+    /// it keeps the existing single-target behaviour rather than becoming
+    /// a peek list.
+    #[test]
+    fn goto_definition_non_call_reference_to_an_overload_stays_single() {
+        let src = "void F(int a) {}\nvoid F(float a) {}\nvoid main() { startnew(F); }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let loc = goto_at(&tw, 0, 2, "(F)", 1);
+        assert!(loc.is_some(), "a bare reference must still resolve");
+    }
+
+    #[test]
+    fn goto_definition_b104_second_review_receiver_overloads_keep_the_union() {
+        let src = "interface I {\nvoid Go();\nvoid Go(int x);\nvoid Go(float x);\nvoid Go(int x, int y);\n}\nclass C : I {\nvoid Go() {}\nvoid Go(int x) {}\nvoid Go(float x) {}\nvoid Go(int x, int y) {}\nvoid Go(int x, int y, int z) {}\n}\nclass D : I {\nvoid Go(int x, int y) {}\n}\nvoid f(I@ i) {\ni.Go(1, 2);\ni.Go(1);\ni.Go(1, 2, 3, 4);\n}\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+
+        let precise = goto_all(&tw, 0, 17, "i.Go", 2);
+        assert_eq!(
+            lines_of(&precise),
+            vec![4, 10, 14],
+            "a unique static overload still offers every matching workspace implementation"
+        );
+
+        let ambiguous = goto_all(&tw, 0, 18, "i.Go", 2);
+        assert_eq!(
+            lines_of(&ambiguous),
+            vec![1, 7, 2, 8, 3, 9, 4, 10, 14],
+            "several arity matches make the call ambiguous, so every static overload and its matching implementations must appear"
+        );
+
+        let no_arity_match = goto_all(&tw, 0, 19, "i.Go", 2);
+        assert_eq!(
+            lines_of(&no_arity_match),
+            vec![1, 7, 2, 8, 3, 9, 4, 10, 14],
+            "zero matches must list every declared overload and its matching implementation, never C's unrelated three-arg overload"
+        );
+    }
+
+    #[test]
+    fn goto_definition_b104_second_review_finds_effective_inherited_implementations() {
+        let src = "interface I { void M(); }\nclass Direct { void M() {} }\nclass Mid : Direct {}\nclass Left : Direct, I {}\nclass Right : I, Direct {}\nclass Deep : Mid, I {}\nclass Own : I { void M() {} }\nvoid f(I@ i) { i.M(); }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let locs = goto_all(&tw, 0, 7, "i.M", 2);
+        assert_eq!(
+            lines_of(&locs),
+            vec![0, 1, 6],
+            "Direct::M is the effective definition for both base-list orders and the transitive case; Own::M remains a direct implementation"
+        );
+    }
+
+    #[test]
+    fn goto_definition_b104_second_review_requires_exact_return_and_parameter_modes() {
+        let src = "class T {}\ninterface I {\nint A(const T &in x);\nint B(T &out x);\nint C(T x);\nint D(T@ x);\nint E(T@ &in x);\n}\nclass Exact : I {\nint A(const T &in x) { return 1; }\nint B(T &out x) { return 1; }\nint C(T x) { return 1; }\nint D(T@ x) { return 1; }\nint E(T@ &in x) { return 1; }\n}\nclass WrongMode : I {\nint A(T &in x) { return 1; }\nint B(T &in x) { return 1; }\nint C(T@ x) { return 1; }\nint D(T x) { return 1; }\nint E(T@ &out x) { return 1; }\n}\nclass WrongReturn : I {\nuint A(const T &in x) { return 1; }\n}\nvoid f(I@ i, T@ t) {\ni.A(t);\ni.B(t);\ni.C(t);\ni.D(t);\ni.E(t);\n}\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        for (line, name, declaration, implementation) in [
+            (26, "i.A", 2, 9),
+            (27, "i.B", 3, 10),
+            (28, "i.C", 4, 11),
+            (29, "i.D", 5, 12),
+            (30, "i.E", 6, 13),
+        ] {
+            let locs = goto_all(&tw, 0, line, name, 2);
+            assert_eq!(
+                lines_of(&locs),
+                vec![declaration, implementation],
+                "{name} must include only the exact return/parameter-mode implementation"
+            );
+        }
+    }
+
+    #[test]
+    fn goto_definition_b104_review_implicit_this_matches_explicit_member_navigation() {
+        let src = "class Base {\nvoid Go() {}\nvoid Pick(int x) {}\nvoid Pick(float x) {}\nvoid Use() {\nGo();\nthis.Go();\nPick(1);\n}\n}\nclass Derived : Base {\nvoid Go() {}\nvoid Pick(int x) {}\nvoid Pick(float x) {}\n}\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+
+        for (line, needle) in [(5, "Go()"), (6, "this.Go")] {
+            let locs = goto_all(&tw, 0, line, needle, if line == 5 { 0 } else { 5 });
+            assert_eq!(
+                lines_of(&locs),
+                vec![1, 11],
+                "bare and this. calls must both return Base::Go then Derived::Go"
+            );
+        }
+
+        let overloaded = goto_all(&tw, 0, 7, "Pick(1)", 0);
+        assert_eq!(
+            lines_of(&overloaded),
+            vec![2, 12, 3, 13],
+            "an ambiguous implicit-this overload must use the same declaration/implementation grouping"
+        );
+    }
+
+    #[test]
+    fn goto_definition_b104_review_orders_implementations_by_uri_not_file_id() {
+        let tw = crate::server::test_support::TestWorkspace::files(&[
+            ("z_impl", "class Z : I { void Go() {} }\n"),
+            ("m_iface", "interface I { void Go(); }\n"),
+            ("a_impl", "class A : I { void Go() {} }\n"),
+            ("use", "void f(I@ i) { i.Go(); }\n"),
+        ]);
+        let locs = goto_all(&tw, 3, 0, "i.Go", 2);
+        let uris: Vec<_> = locs.iter().map(|loc| loc.uri.clone()).collect();
+        assert_eq!(
+            uris,
+            vec![tw.uri_of(1), tw.uri_of(2), tw.uri_of(0)],
+            "the static declaration leads; implementations are URI-lexical even when file IDs are not"
+        );
+    }
+
+    #[test]
+    fn goto_definition_b104_review_excludes_subinterfaces_and_handles_namespaced_cycles() {
+        let src = "namespace N {\ninterface I { void Go(); }\ninterface J : I { void Go(); }\nclass C : J { void Go() {} }\ninterface A : B { void Run(); }\ninterface B : A {}\nclass D : A { void Run() {} }\n}\nvoid f(N::I@ i, N::A@ a) { i.Go(); a.Run(); }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+
+        let go = goto_all(&tw, 0, 8, "i.Go", 2);
+        assert_eq!(
+            lines_of(&go),
+            vec![1, 3],
+            "only workspace classes are implementations: N::J must not appear"
+        );
+
+        let run = goto_all(&tw, 0, 8, "a.Run", 2);
+        assert_eq!(
+            lines_of(&run),
+            vec![4, 6],
+            "cyclic interface inheritance must terminate and still find N::D"
+        );
+    }
+
+    #[test]
+    fn goto_definition_b104_review_compound_accessor_keeps_signature_pairs_grouped() {
+        let src = "interface I {\nuint get_ID();\nvoid set_ID(uint value);\n}\nclass C : I {\nuint get_ID() { return 1; }\nvoid set_ID(uint value) {}\nvoid set_ID(uint value, uint extra) {}\n}\nvoid f(I@ i) { i.ID += 1; }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let locs = goto_all(&tw, 0, 9, "i.ID", 2);
+        assert_eq!(
+            lines_of(&locs),
+            vec![1, 5, 2, 6],
+            "getter + matching implementation must precede setter + matching implementation"
         );
     }
 }
