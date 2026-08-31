@@ -100,14 +100,19 @@ impl VersionCatalog {
     ) -> Result<Self, String> {
         let mut entries = Vec::new();
         if let Some((core, game)) = installed {
-            entries.push(Self::entry_from_pair(core, game, EntrySource::Installed, None)?);
+            entries.push(Self::entry_from_pair(
+                core,
+                game,
+                EntrySource::Installed,
+                None,
+            )?);
         }
         if let Some(root) = versions_root {
             let dir = std::fs::read_dir(root)
                 .map_err(|e| format!("failed to read versions dir {}: {e}", root.display()))?;
             for item in dir {
-                let item =
-                    item.map_err(|e| format!("failed to read versions dir {}: {e}", root.display()))?;
+                let item = item
+                    .map_err(|e| format!("failed to read versions dir {}: {e}", root.display()))?;
                 let path = item.path();
                 let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
                     continue;
@@ -149,12 +154,11 @@ impl VersionCatalog {
         let core = TypeDbMeta::probe(core_json)?;
         // Parse errors in the game dump surface now, not at load time.
         let _game = TypeDbMeta::probe(game_json)?;
-        let stamp = core.op.ok_or_else(|| {
-            format!("{}: no `op` version stamp", core_json.display())
-        })?;
-        let version = OpVersion::parse(&stamp).ok_or_else(|| {
-            format!("{}: unparseable `op` stamp {stamp:?}", core_json.display())
-        })?;
+        let stamp = core
+            .op
+            .ok_or_else(|| format!("{}: no `op` version stamp", core_json.display()))?;
+        let version = OpVersion::parse(&stamp)
+            .ok_or_else(|| format!("{}: unparseable `op` stamp {stamp:?}", core_json.display()))?;
         if let Some(expected) = expect {
             if version != expected {
                 return Err(format!(
@@ -353,8 +357,7 @@ pub fn resolve_single_pair(
     versions_root: Option<&Path>,
     requested: Option<&str>,
 ) -> (Option<(PathBuf, PathBuf)>, Option<String>) {
-    let installed_pair =
-        || installed.map(|(c, g)| (c.to_path_buf(), g.to_path_buf()));
+    let installed_pair = || installed.map(|(c, g)| (c.to_path_buf(), g.to_path_buf()));
     if versions_root.is_none() && requested.is_none() {
         return (installed_pair(), None);
     }
@@ -421,7 +424,10 @@ mod tests {
     fn op_version_orders_numerically_not_lexically() {
         let v5 = OpVersion::parse("1.29.5").unwrap();
         let v14 = OpVersion::parse("1.29.14").unwrap();
-        assert!(v5 < v14, "1.29.5 < 1.29.14 (lexical order would invert this)");
+        assert!(
+            v5 < v14,
+            "1.29.5 < 1.29.14 (lexical order would invert this)"
+        );
         assert_eq!(v14.to_string(), "1.29.14");
     }
 
@@ -447,8 +453,18 @@ mod tests {
     #[test]
     fn catalog_discovers_recorded_snapshots_sorted() {
         let dir = tmp("discover");
-        write_snapshot(dir.path(), "1.29.14", "1.29.14 (next, Public, 6fd4200f)", "1.29.14");
-        write_snapshot(dir.path(), "1.29.5", "1.29.5 (next, Public, 1234ad9e)", "1.29.5");
+        write_snapshot(
+            dir.path(),
+            "1.29.14",
+            "1.29.14 (next, Public, 6fd4200f)",
+            "1.29.14",
+        );
+        write_snapshot(
+            dir.path(),
+            "1.29.5",
+            "1.29.5 (next, Public, 1234ad9e)",
+            "1.29.5",
+        );
         let cat = VersionCatalog::build(None, Some(dir.path())).unwrap();
         let labels: Vec<_> = cat.entries().iter().map(|e| e.label.as_str()).collect();
         assert_eq!(labels, ["1.29.5", "1.29.14"], "numeric order, not lexical");
@@ -465,7 +481,12 @@ mod tests {
     #[test]
     fn catalog_rejects_dirname_stamp_mismatch() {
         let dir = tmp("mismatch");
-        write_snapshot(dir.path(), "1.29.5", "1.29.14 (next, Public, 6fd4200f)", "1.29.14");
+        write_snapshot(
+            dir.path(),
+            "1.29.5",
+            "1.29.14 (next, Public, 6fd4200f)",
+            "1.29.14",
+        );
         let err = VersionCatalog::build(None, Some(dir.path())).unwrap_err();
         assert!(
             err.contains("1.29.5") && err.contains("1.29.14"),
@@ -476,10 +497,18 @@ mod tests {
     #[test]
     fn catalog_includes_installed_entry_from_paths() {
         let dir = tmp("installed");
-        write_snapshot(dir.path(), "install", "1.29.9 (next, Public, abcd1234)", "1.29.9");
+        write_snapshot(
+            dir.path(),
+            "install",
+            "1.29.9 (next, Public, abcd1234)",
+            "1.29.9",
+        );
         let d = dir.path().join("install");
         let cat = VersionCatalog::build(
-            Some((&d.join("OpenplanetCore.json"), &d.join("OpenplanetNext.json"))),
+            Some((
+                &d.join("OpenplanetCore.json"),
+                &d.join("OpenplanetNext.json"),
+            )),
             None,
         )
         .unwrap();
@@ -499,7 +528,12 @@ mod tests {
         let dir = tmp("broken");
         // A README or stray file at the root is ignored…
         std::fs::write(dir.path().join("README.md"), "docs").unwrap();
-        write_snapshot(dir.path(), "1.29.5", "1.29.5 (next, Public, 1234ad9e)", "1.29.5");
+        write_snapshot(
+            dir.path(),
+            "1.29.5",
+            "1.29.5 (next, Public, 1234ad9e)",
+            "1.29.5",
+        );
         // …but a version-named dir with a truncated dump is an error, never
         // silently skipped (a truncated harvest must not look empty —
         // TypeDbMeta::probe's rule).
@@ -511,17 +545,33 @@ mod tests {
         )
         .unwrap();
         let err = VersionCatalog::build(None, Some(dir.path())).unwrap_err();
-        assert!(err.contains("1.29.6"), "error names the broken snapshot: {err}");
+        assert!(
+            err.contains("1.29.6"),
+            "error names the broken snapshot: {err}"
+        );
     }
 
     #[test]
     fn catalog_known_versions_marks_installed() {
         let dir = tmp("known");
-        write_snapshot(dir.path(), "1.29.5", "1.29.5 (next, Public, 1234ad9e)", "1.29.5");
-        write_snapshot(dir.path(), "install", "1.29.9 (next, Public, abcd1234)", "1.29.9");
+        write_snapshot(
+            dir.path(),
+            "1.29.5",
+            "1.29.5 (next, Public, 1234ad9e)",
+            "1.29.5",
+        );
+        write_snapshot(
+            dir.path(),
+            "install",
+            "1.29.9 (next, Public, abcd1234)",
+            "1.29.9",
+        );
         let d = dir.path().join("install");
         let cat = VersionCatalog::build(
-            Some((&d.join("OpenplanetCore.json"), &d.join("OpenplanetNext.json"))),
+            Some((
+                &d.join("OpenplanetCore.json"),
+                &d.join("OpenplanetNext.json"),
+            )),
             Some(dir.path()),
         )
         .unwrap();
@@ -531,12 +581,30 @@ mod tests {
     /// Catalog with installed 1.29.9 and recorded 1.29.5 + 1.29.14.
     fn full_catalog(tag: &str) -> (crate::testing::TempDir, VersionCatalog) {
         let dir = tmp(tag);
-        write_snapshot(dir.path(), "1.29.5", "1.29.5 (next, Public, 1234ad9e)", "1.29.5");
-        write_snapshot(dir.path(), "1.29.14", "1.29.14 (next, Public, 6fd4200f)", "1.29.14");
-        write_snapshot(dir.path(), "install", "1.29.9 (next, Public, abcd1234)", "1.29.9");
+        write_snapshot(
+            dir.path(),
+            "1.29.5",
+            "1.29.5 (next, Public, 1234ad9e)",
+            "1.29.5",
+        );
+        write_snapshot(
+            dir.path(),
+            "1.29.14",
+            "1.29.14 (next, Public, 6fd4200f)",
+            "1.29.14",
+        );
+        write_snapshot(
+            dir.path(),
+            "install",
+            "1.29.9 (next, Public, abcd1234)",
+            "1.29.9",
+        );
         let d = dir.path().join("install");
         let cat = VersionCatalog::build(
-            Some((&d.join("OpenplanetCore.json"), &d.join("OpenplanetNext.json"))),
+            Some((
+                &d.join("OpenplanetCore.json"),
+                &d.join("OpenplanetNext.json"),
+            )),
             Some(dir.path()),
         )
         .unwrap();
@@ -555,7 +623,12 @@ mod tests {
     #[test]
     fn resolve_default_without_installed_is_empty() {
         let dir = tmp("resolve-noinstall");
-        write_snapshot(dir.path(), "1.29.5", "1.29.5 (next, Public, 1234ad9e)", "1.29.5");
+        write_snapshot(
+            dir.path(),
+            "1.29.5",
+            "1.29.5 (next, Public, 1234ad9e)",
+            "1.29.5",
+        );
         let cat = VersionCatalog::build(None, Some(dir.path())).unwrap();
         assert!(cat.resolve_targets(None).unwrap().is_empty());
     }
@@ -563,11 +636,24 @@ mod tests {
     #[test]
     fn resolve_matches_installed_before_recorded() {
         let dir = tmp("resolve-prefer");
-        write_snapshot(dir.path(), "1.29.5", "1.29.5 (next, Public, 1234ad9e)", "1.29.5");
-        write_snapshot(dir.path(), "install", "1.29.5 (next, Public, 9999ffff)", "1.29.5");
+        write_snapshot(
+            dir.path(),
+            "1.29.5",
+            "1.29.5 (next, Public, 1234ad9e)",
+            "1.29.5",
+        );
+        write_snapshot(
+            dir.path(),
+            "install",
+            "1.29.5 (next, Public, 9999ffff)",
+            "1.29.5",
+        );
         let d = dir.path().join("install");
         let cat = VersionCatalog::build(
-            Some((&d.join("OpenplanetCore.json"), &d.join("OpenplanetNext.json"))),
+            Some((
+                &d.join("OpenplanetCore.json"),
+                &d.join("OpenplanetNext.json"),
+            )),
             Some(dir.path()),
         )
         .unwrap();
@@ -582,9 +668,7 @@ mod tests {
     #[test]
     fn resolve_comma_list_dedups_preserving_order() {
         let (_g, cat) = full_catalog("resolve-list");
-        let targets = cat
-            .resolve_targets(Some("1.29.14,1.29.5,1.29.14"))
-            .unwrap();
+        let targets = cat.resolve_targets(Some("1.29.14,1.29.5,1.29.14")).unwrap();
         let labels: Vec<_> = targets.iter().map(|e| e.label.as_str()).collect();
         assert_eq!(labels, ["1.29.14", "1.29.5"], "input order, first wins");
     }
@@ -632,7 +716,10 @@ mod tests {
         .unwrap();
     }
 
-    fn notes_catalog(tag: &str, snapshots: &[(&str, &str, &str, &str)]) -> (crate::testing::TempDir, VersionCatalog) {
+    fn notes_catalog(
+        tag: &str,
+        snapshots: &[(&str, &str, &str, &str)],
+    ) -> (crate::testing::TempDir, VersionCatalog) {
         let dir = tmp(tag);
         for (version, functions, classes, enums) in snapshots {
             write_snapshot_with(dir.path(), version, version, functions, classes, enums);
@@ -690,13 +777,21 @@ mod tests {
                     r#"{"ns":"Net","name":"SecureSocket"}"#,
                     "",
                 ),
-                ("2.0.0", "", "", r#"{"ns":"UI","name":"NewCond","values":{}}"#),
+                (
+                    "2.0.0",
+                    "",
+                    "",
+                    r#"{"ns":"UI","name":"NewCond","values":{}}"#,
+                ),
             ],
         );
         let old = cat.notes_for_target(target(&cat, "1.0.0")).unwrap();
         assert_eq!(old.get("UI::NewCond"), Some("added in Openplanet 2.0.0"));
         let new = cat.notes_for_target(target(&cat, "2.0.0")).unwrap();
-        assert_eq!(new.get("Net::SecureSocket"), Some("removed in Openplanet 2.0.0"));
+        assert_eq!(
+            new.get("Net::SecureSocket"),
+            Some("removed in Openplanet 2.0.0")
+        );
         assert_eq!(new.get("GlobalFn"), Some("removed in Openplanet 2.0.0"));
     }
 
@@ -718,30 +813,44 @@ mod tests {
 
     #[test]
     fn real_fixtures_derive_text_join_added_and_string_join_removed() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/typedb-versions");
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb-versions");
         let cat = VersionCatalog::build(None, Some(&root)).unwrap();
         let v5 = target(&cat, "1.29.5");
         let v14 = target(&cat, "1.29.14");
         let notes5 = cat.notes_for_target(v5).unwrap();
-        assert_eq!(notes5.get("Text::Join"), Some("added in Openplanet 1.29.14"));
+        assert_eq!(
+            notes5.get("Text::Join"),
+            Some("added in Openplanet 1.29.14")
+        );
         let notes14 = cat.notes_for_target(v14).unwrap();
-        assert_eq!(notes14.get("string::Join"), Some("removed in Openplanet 1.29.14"));
+        assert_eq!(
+            notes14.get("string::Join"),
+            Some("removed in Openplanet 1.29.14")
+        );
         assert_eq!(
             notes14.get("Net::SecureSocket"),
             Some("removed in Openplanet 1.29.14")
         );
-        assert_eq!(notes14.get("Text::Join"), None, "present on target → no note");
+        assert_eq!(
+            notes14.get("Text::Join"),
+            None,
+            "present on target → no note"
+        );
     }
 
     #[test]
     fn resolve_single_pair_defaults_to_installed_without_flags() {
         let dir = tmp("pair-default");
-        write_snapshot(dir.path(), "install", "1.29.9 (next, Public, abcd1234)", "1.29.9");
+        write_snapshot(
+            dir.path(),
+            "install",
+            "1.29.9 (next, Public, abcd1234)",
+            "1.29.9",
+        );
         let d = dir.path().join("install");
         let installed = (d.join("OpenplanetCore.json"), d.join("OpenplanetNext.json"));
-        let (pair, warning) =
-            resolve_single_pair(Some((&installed.0, &installed.1)), None, None);
+        let (pair, warning) = resolve_single_pair(Some((&installed.0, &installed.1)), None, None);
         assert_eq!(pair, Some(installed));
         assert_eq!(warning, None);
     }
@@ -749,7 +858,12 @@ mod tests {
     #[test]
     fn resolve_single_pair_picks_recorded_version() {
         let dir = tmp("pair-recorded");
-        write_snapshot(dir.path(), "1.29.5", "1.29.5 (next, Public, 1234ad9e)", "1.29.5");
+        write_snapshot(
+            dir.path(),
+            "1.29.5",
+            "1.29.5 (next, Public, 1234ad9e)",
+            "1.29.5",
+        );
         let (pair, warning) = resolve_single_pair(None, Some(dir.path()), Some("1.29.5"));
         let (core, _) = pair.expect("recorded snapshot resolves");
         assert!(core.ends_with("1.29.5/OpenplanetCore.json"), "{core:?}");
@@ -759,8 +873,18 @@ mod tests {
     #[test]
     fn resolve_single_pair_falls_back_to_installed_on_unknown_version() {
         let dir = tmp("pair-unknown");
-        write_snapshot(dir.path(), "1.29.5", "1.29.5 (next, Public, 1234ad9e)", "1.29.5");
-        write_snapshot(dir.path(), "install", "1.29.9 (next, Public, abcd1234)", "1.29.9");
+        write_snapshot(
+            dir.path(),
+            "1.29.5",
+            "1.29.5 (next, Public, 1234ad9e)",
+            "1.29.5",
+        );
+        write_snapshot(
+            dir.path(),
+            "install",
+            "1.29.9 (next, Public, abcd1234)",
+            "1.29.9",
+        );
         let d = dir.path().join("install");
         let installed = (d.join("OpenplanetCore.json"), d.join("OpenplanetNext.json"));
         let (pair, warning) = resolve_single_pair(
@@ -779,10 +903,19 @@ mod tests {
     #[test]
     fn resolve_single_pair_takes_first_of_a_list_with_warning() {
         let dir = tmp("pair-list");
-        write_snapshot(dir.path(), "1.29.5", "1.29.5 (next, Public, 1234ad9e)", "1.29.5");
-        write_snapshot(dir.path(), "1.29.14", "1.29.14 (next, Public, 6fd4200f)", "1.29.14");
-        let (pair, warning) =
-            resolve_single_pair(None, Some(dir.path()), Some("1.29.14,1.29.5"));
+        write_snapshot(
+            dir.path(),
+            "1.29.5",
+            "1.29.5 (next, Public, 1234ad9e)",
+            "1.29.5",
+        );
+        write_snapshot(
+            dir.path(),
+            "1.29.14",
+            "1.29.14 (next, Public, 6fd4200f)",
+            "1.29.14",
+        );
+        let (pair, warning) = resolve_single_pair(None, Some(dir.path()), Some("1.29.14,1.29.5"));
         let (core, _) = pair.expect("first target resolves");
         assert!(core.ends_with("1.29.14/OpenplanetCore.json"), "{core:?}");
         let warning = warning.expect("multi-version request on the server warns");

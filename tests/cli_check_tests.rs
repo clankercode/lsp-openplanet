@@ -4973,6 +4973,99 @@ fn check_command_issue_repro_b061_property_read_credits_accessor() {
     }
 }
 
+/// B094: `class C : I` that does not provide a method `I` declares.
+///
+/// End-to-end through the CLI, which shares its diagnostic path with the LSP
+/// publish loop — that loop iterates every checker diagnostic with no kind
+/// allowlist, so "these need to work in the extension too" needs nothing in
+/// `../lsp-openplanet-ext/` (a thin LSP client that never enumerates kinds).
+/// This test is the evidence for that claim rather than the code reading.
+///
+/// Engine-measured, OP 1.29.5, 2026-08-31, each fixture its own plugin so
+/// each was its own compilation unit. The message is the game's verbatim,
+/// including the expected signature, because a same-name-DIFFERENT-SIGNATURE
+/// method is reported by the engine AS missing rather than as a distinct
+/// mismatch error — which settles the "unless openplanet compile error is
+/// just unimplemented" question in the ticket.
+///
+/// Exactly 6 diagnostics: three offending classes times two methods. The
+/// four correct classes in the SAME FILE are the gate — a rule that reported
+/// on every `: I` would pass the first half and fail here.
+#[test]
+fn check_command_issue_repro_b094_interface_not_implemented() {
+    let (_, stdout, stderr) = run_issue_repro_typedb("b094-interface-not-implemented");
+    let errors: Vec<&str> = stdout.lines().filter(|l| l.contains("error:")).collect();
+
+    let expected = [
+        // Nothing implemented at all — one diagnostic per missing method.
+        (
+            "Main.as:13:7",
+            "Missing implementation of 'void IThing::Go()'",
+        ),
+        (
+            "Main.as:13:7",
+            "Missing implementation of 'int IThing::Count(float)'",
+        ),
+        // Same names, wrong signatures — the engine calls this missing too.
+        (
+            "Main.as:16:7",
+            "Missing implementation of 'void IThing::Go()'",
+        ),
+        (
+            "Main.as:16:7",
+            "Missing implementation of 'int IThing::Count(float)'",
+        ),
+        // `abstract` does NOT exempt. Measured; opposite of the usual rule.
+        (
+            "Main.as:22:16",
+            "Missing implementation of 'void IThing::Go()'",
+        ),
+        (
+            "Main.as:22:16",
+            "Missing implementation of 'int IThing::Count(float)'",
+        ),
+    ];
+    assert_eq!(
+        errors.len(),
+        expected.len(),
+        "expected exactly {} errors; stdout={stdout:?} stderr={stderr:?}",
+        expected.len()
+    );
+    for (loc, message) in expected {
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains(loc) && e.contains(message)),
+            "missing `{loc}: {message}`; stdout={stdout:?}"
+        );
+    }
+
+    // The silences, each measured CLEAN against the engine. They live in the
+    // same file as the failures so "report on every `: I`" cannot pass.
+    for (line, why) in [
+        ("Main.as:31", "Correct — a correct implementation"),
+        (
+            "Main.as:37",
+            "PrivateSatisfies — `private` implements the interface",
+        ),
+        (
+            "Main.as:47",
+            "InheritsImplementation — inherited from a base class",
+        ),
+    ] {
+        assert!(
+            !errors.iter().any(|e| e.contains(line)),
+            "`{line}` must stay silent ({why}); stdout={stdout:?}"
+        );
+    }
+    assert!(
+        stdout.contains("6 diagnostics"),
+        "the fixture must produce B094 diagnostics and nothing else — an \
+         unused-declaration warning creeping in hides a change in what this \
+         asserts; stdout={stdout:?}"
+    );
+}
+
 /// B087: the plugin's CROSS-PLUGIN SURFACE must never be reported unused —
 /// both halves of it.
 ///

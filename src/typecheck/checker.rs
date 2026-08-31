@@ -209,6 +209,19 @@ pub enum TypeDiagnosticKind {
     /// `Reference is read-only` (Scene.as 258:28, OP 1.29.5). The `@ty =`
     /// handle rebind stays legal — the handle slot is mutable.
     ReadOnlyReference,
+    /// B094: `class C : I` does not provide a method `I` declares.
+    ///
+    /// The engine's message is reproduced verbatim, including the expected
+    /// signature, because measurement showed the engine reports a
+    /// same-name-DIFFERENT-SIGNATURE method under this same message rather
+    /// than as a distinct mismatch error — so the signature is the entire
+    /// information content, and it is what tells a user whether the method
+    /// is absent or merely declared wrong. Game-probed OP 1.29.5,
+    /// 2026-08-31; see `typecheck::interface_impl`.
+    MissingInterfaceImplementation {
+        /// `void I::M(const string&in)` — engine spelling.
+        signature: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -395,6 +408,10 @@ impl TypeDiagnostic {
             TypeDiagnosticKind::ReadOnlyReference => {
                 // Game wording (OP 1.29.5, Scene.as 258:28).
                 "Reference is read-only".to_string()
+            }
+            TypeDiagnosticKind::MissingInterfaceImplementation { signature } => {
+                // Game wording, verbatim (OP 1.29.5, probed 2026-08-31).
+                format!("Missing implementation of '{}'", signature)
             }
         }
     }
@@ -1375,6 +1392,21 @@ impl<'a> Checker<'a> {
         } else {
             format!("{}::{}", self.namespace_stack.join("::"), simple_class_name)
         };
+        // B094: interface methods this class declares but does not provide.
+        // One diagnostic per missing method, spanned at the class NAME —
+        // that is where the engine points for a plain class, and it is the
+        // anchor B095's "implement missing methods" action needs.
+        for missing in
+            crate::typecheck::interface_impl::missing_interface_methods(&class_name, self.scope)
+        {
+            self.diagnostics.push(TypeDiagnostic {
+                span: cls.name.span,
+                kind: TypeDiagnosticKind::MissingInterfaceImplementation {
+                    signature: missing.signature,
+                },
+            });
+        }
+
         let mut members: Vec<(String, TypeRepr)> = Vec::new();
         for member in &cls.members {
             match member {
@@ -5242,9 +5274,8 @@ mod tests {
                 }
                 _ => None,
             });
-            let (qualified, hint) = hit.unwrap_or_else(|| {
-                panic!("expected NoMatchingSymbol for {call:?}, got {diags:?}")
-            });
+            let (qualified, hint) = hit
+                .unwrap_or_else(|| panic!("expected NoMatchingSymbol for {call:?}, got {diags:?}"));
             assert!(qualified.starts_with("string::"), "{qualified}");
             assert_eq!(hint.as_deref(), Some(expect_hint), "for {call:?}");
         }

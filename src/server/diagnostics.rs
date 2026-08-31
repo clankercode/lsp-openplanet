@@ -141,12 +141,13 @@ pub fn compute_diagnostics_with_versions(
             TypeDiagnosticSeverity::Warning => DiagnosticSeverity::WARNING,
         };
         let mut message = diag.message();
-        if let (Some((notes, target_label)), TypeDiagnosticKind::NoMatchingSymbol { qualified, .. }) =
-            (version, &diag.kind)
+        if let (
+            Some((notes, target_label)),
+            TypeDiagnosticKind::NoMatchingSymbol { qualified, .. },
+        ) = (version, &diag.kind)
         {
             if let Some(note) = notes.get(qualified) {
-                message =
-                    format!("{message} ({note}; target is Openplanet {target_label})");
+                message = format!("{message} ({note}; target is Openplanet {target_label})");
             }
         }
         diagnostics.push(Diagnostic {

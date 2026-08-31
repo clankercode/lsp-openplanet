@@ -114,7 +114,11 @@ fn multi_target_labels_version_specific_misses() {
     let opts = parse_check_args(&multi_args(&s, "1.0.0,2.0.0")).unwrap();
     let report = run_check(&opts).unwrap();
 
-    assert_eq!(report.targets, ["1.0.0", "2.0.0"], "report names its targets");
+    assert_eq!(
+        report.targets,
+        ["1.0.0", "2.0.0"],
+        "report names its targets"
+    );
 
     // Ns::Old exists on 1.0.0, missing on 2.0.0 → labeled with 2.0.0 only,
     // and version-enriched: the snapshots prove it was removed in 2.0.0.
@@ -131,7 +135,11 @@ fn multi_target_labels_version_specific_misses() {
     // Ns::Gone exists on 2.0.0, missing on 1.0.0 → labeled with 1.0.0 only,
     // enriched as added in 2.0.0.
     let gone = diags_for(&report, "Ns::Gone");
-    assert_eq!(gone.len(), 1, "one merged diagnostic for Ns::Gone: {gone:?}");
+    assert_eq!(
+        gone.len(),
+        1,
+        "one merged diagnostic for Ns::Gone: {gone:?}"
+    );
     assert_eq!(gone[0].1, ["1.0.0"]);
     assert!(
         gone[0].0.contains("added in Openplanet 2.0.0")
@@ -143,7 +151,11 @@ fn multi_target_labels_version_specific_misses() {
     // Ns::Never is missing on every target → merged, and NOT labeled:
     // firing everywhere is not version news.
     let never = diags_for(&report, "Ns::Never");
-    assert_eq!(never.len(), 1, "one merged diagnostic for Ns::Never: {never:?}");
+    assert_eq!(
+        never.len(),
+        1,
+        "one merged diagnostic for Ns::Never: {never:?}"
+    );
     assert!(
         never[0].1.is_empty(),
         "all-targets diagnostic carries no version label: {never:?}"
@@ -166,7 +178,11 @@ fn single_target_run_has_no_version_labels() {
     .unwrap();
     let report = run_check(&opts).unwrap();
 
-    assert!(report.targets.is_empty(), "legacy single-target run: {:?}", report.targets);
+    assert!(
+        report.targets.is_empty(),
+        "legacy single-target run: {:?}",
+        report.targets
+    );
     assert!(
         report.diagnostics.iter().all(|d| d.versions.is_empty()),
         "no version labels on a single-target run"
@@ -188,7 +204,10 @@ fn formatters_render_version_labels_only_where_version_specific() {
         .lines()
         .find(|l| l.contains("Ns::Old"))
         .expect("plain output has an Ns::Old line");
-    assert!(old_line.contains("[op 2.0.0]"), "version label on: {old_line}");
+    assert!(
+        old_line.contains("[op 2.0.0]"),
+        "version label on: {old_line}"
+    );
     let never_line = plain
         .lines()
         .find(|l| l.contains("Ns::Never"))
@@ -239,7 +258,10 @@ fn single_target_output_is_label_free() {
     .unwrap();
     let report = run_check(&opts).unwrap();
     let plain = format_check_report_for(&report, CheckFormat::Plain);
-    assert!(!plain.contains("[op"), "no labels on single-target runs: {plain}");
+    assert!(
+        !plain.contains("[op"),
+        "no labels on single-target runs: {plain}"
+    );
     let json = format_check_report_for(&report, CheckFormat::Json);
     let doc: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert!(
