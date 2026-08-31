@@ -668,6 +668,27 @@ def run_selftest() -> int:
         "AMBIGUOUS",
     )
     case("RemoteBuild refused the load", start, "AMBIGUOUS", {"error": "boom"})
+    # B154. The two cases above reach their guards through a window that is
+    # AMBIGUOUS FOR ANOTHER REASON, so disabling either guard changed no
+    # verdict and a mutation run found both vacuous. A guard is only tested by
+    # an input that would land somewhere ELSE without it.
+    #
+    # Unbound error, NO start token: without the not-started guard this scores
+    # UNBOUND — a probe that never ran, written down as a fact about the
+    # engine. That is the exact defect the guard exists to prevent.
+    case(
+        "an unbound error with no start token is not a verdict",
+        f"[ERR] {UNBOUND_MSG}",
+        "AMBIGUOUS",
+    )
+    # Load refused, but the window would otherwise read BOUND: without the
+    # load-error guard this reports a measurement from a load that failed.
+    case(
+        "a refused load outranks a window that would otherwise be BOUND",
+        f"{start}\n{TOKEN} bound {v.id} res=xy",
+        "AMBIGUOUS",
+        {"error": "boom"},
+    )
     # B127: the realistic reply for a build whose dependency could not be
     # resolved is a clean success. It must not turn a consumer that never ran
     # into a measurement. This pins the exemption rather than asserting it.
@@ -731,6 +752,64 @@ def run_selftest() -> int:
         )
     if not failures:
         print(f"  ok: {len(VARIANTS)} variants, all ids and function names distinct")
+
+    # ---- PRODUCTION PATHS (B118, B154) --------------------------------
+    #
+    # Every check above hands `classify` a SYNTHETIC window, so none of them
+    # can see which reader `run()` actually uses or what the consumer plugin
+    # really contains. A mutation run confirmed it: swapping the raw reader for
+    # the filtered one, and deleting the consumer's call to the import, both
+    # left this selftest green. B118's rule, earned three times over -- a
+    # selftest that injects every input is blind to the path production takes.
+
+    # WHICH READER. `fleet.read_log_window` drops `[ TRAC]` lines and keeps
+    # what looks compile-relevant; this probe's whole evidence is a plugin's
+    # print() and a runtime exception, so the filtered reader cannot see the
+    # answer. Observed by substitution rather than asserted.
+    seen: list[str] = []
+    orig_raw, orig_filtered = fleet.read_log_window_raw, fleet.read_log_window
+    try:
+        fleet.read_log_window_raw = lambda m: (seen.append("raw"), "RAW")[1]
+        fleet.read_log_window = lambda m, f=None: (seen.append("filtered"), "FILT")[1]
+        got = read_raw_window(0)
+    finally:
+        fleet.read_log_window_raw, fleet.read_log_window = orig_raw, orig_filtered
+    if seen != ["raw"] or got != "RAW":
+        failures.append(
+            f"read_raw_window used {seen or 'no reader'}, not the RAW reader: the "
+            f"filtered one drops the [ TRAC] lines this probe measures"
+        )
+    else:
+        print("  ok: the window reader is the RAW one, observed not assumed")
+
+    # WHAT THE CONSUMER CONTAINS. Binding is a RUNTIME property (B086): an
+    # unmatched stub compiles fine on BOTH sides and only fails when reached,
+    # so a consumer that does not CALL the import measures nothing at all.
+    import tempfile as _tf
+
+    with _tf.TemporaryDirectory(prefix="b086-selftest-") as _td:
+        made = write_consumer(Path(_td), v)
+        src = (made / "src" / "Main.as").read_text()
+        toml = (made / "info.toml").read_text()
+        expected_call = v.call % {"NS": MODULE}
+        if expected_call not in src:
+            failures.append(
+                f"the generated consumer does not CALL the import: {expected_call!r} "
+                f"is absent, so the fixture would prove only that a stub compiles"
+            )
+        elif f"{TOKEN} start {v.id}" not in src:
+            failures.append(
+                "the consumer does not print its start token, so a run that never "
+                "happened could not be told from one that returned nothing"
+            )
+        elif EXPORTER_ID not in toml:
+            failures.append(
+                "the consumer does not declare a dependency on the exporter, so the "
+                "import could not resolve for reasons unrelated to binding"
+            )
+        else:
+            print("  ok: the generated consumer calls the import, prints its start "
+                  "token, and depends on the exporter")
 
     if failures:
         print("\nFAIL: probe-export-binding selftest", file=sys.stderr)

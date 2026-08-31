@@ -33,18 +33,19 @@ PROBES = ("probe_const_receiver", "probe_member_visibility",
 # and an unexplained exemption is indistinguishable from an oversight.
 COVERED_ELSEWHERE = {
     "probe_enum_corpus": "just enum-probe-mutants (check_enum_probe_nonvacuous.py)",
+    "probe_export_binding": "just probe-export-binding-mutants "
+                            "(check_export_binding_nonvacuous.py)",
 }
 
 # Probes with a `--selftest` and NO mutation coverage ANYWHERE. Each is a real
 # gap. They are listed so the gap is REPORTED on every run rather than silently
 # exempted — the same treatment B129 gives a corpus with no generator, because
 # a known hole that nothing prints is a hole nobody closes.
-UNCOVERED = {
-    "probe_export_binding":
-        "B086's export-binding probe. Its selftest is the one this repo cites as "
-        "the shape a probe oracle should have, and nothing proves that selftest "
-        "can fail. Surfaced by the discovery check added in B148.",
-}
+# Probes with a `--selftest` and NO mutation coverage ANYWHERE. Empty as of
+# B154, which closed the last one. Kept rather than deleted: this is the list a
+# new probe lands on, and the reporting below is what makes the gap visible
+# instead of silently exempt.
+UNCOVERED: dict[str, str] = {}
 
 
 def discovered_probes() -> set[str]:
