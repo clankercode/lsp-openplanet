@@ -1,0 +1,41 @@
+---
+complexity: medium
+created_at: "2026-08-31T08:48:33Z"
+depends_on: []
+estimate_hours: 1
+id: B093
+priority: medium
+status: pending
+tags: []
+title: No quick fix for NoMatchingSymbol relocation hints (string::Join->Text::Join, Draw::*->Display::*)
+updated_at: "2026-08-31T08:48:33Z"
+---
+## Expected Behavior
+
+A `NoMatchingSymbol` diagnostic that carries a relocation hint (structured
+`hint` field: `string::Join` → `Text::Join`, `string::Repeat` →
+`Text::Repeat`, `Draw::GetWidth` → `Display::GetWidth`, …) should offer a
+code action that rewrites the qualified callee to the hinted name — the
+hint is already data (a qualified name), not prose.
+
+## Actual Behavior
+
+`did_you_mean` matches only `unknown type`/`undefined identifier`
+messages; the `removed_api` family drives only `RemovedApiUsage` (member
+path). Nothing claims `NoMatchingSymbol`, so relocations are hint-text
+only. Pre-existing gap for `Draw::*`; extended to `string::Join`/`Repeat`
+by GH #18 (see `removed_api_hint` in src/typecheck/checker.rs).
+
+## Notes
+
+- The near-name (typo) hints share the same `hint` field and are equally
+  valid rename targets; one fix family can serve both.
+- Needs the structured kind at code-action time (message parsing is
+  forbidden per removed_api.rs doctrine) — check what FixContext exposes.
+
+## Test cases
+
+- `string::Join(...)` on a 1.29.14 typedb → action rewriting to
+  `Text::Join`, call shape untouched (same-arity rename).
+- `Draw::GetWidth()` on 1.29.5 → action rewriting to `Display::GetWidth`.
+- Negative: NoMatchingSymbol with no hint → no action offered.
