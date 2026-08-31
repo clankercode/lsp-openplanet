@@ -431,3 +431,5 @@ Worth recording as a hypothesis rather than a finding: the original
 `namespace Foo { namespace Bar { ... } }`", reads exactly like a deliberately
 hand-staged B052 test fixture. A plausible supplier, NOT a measured one. A
 `git log` over the B052 lane's history could settle it cheaply.
+
+Lane decision (coordinator, 2026-08-31): assigned to lane-tooling, and it GATES B096. B096 needs game probes to answer whether the engine binds an import to a namespaced body and accepts shared interface/enum/funcdef; lane-tooling has just MEASURED that probe_enum_corpus.py does not work either (the file-watcher theory is refuted -- a staged folder left 8s produces nothing, while tm-control-mcp loads it immediately). So every probing route is currently blocked or routed through tm-control-mcp, and B097 is the ticket that unblocks them. Do B097 first, then B096 with the restored probe.
