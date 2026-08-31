@@ -160,3 +160,4 @@ bugs:
     - file: B159-cargo-fmt-drift-recurs-on-ever.todo
     - file: B160-adopt-the-engine-spelling-in-n.todo
     - file: B161-b102-array-sort-correct-callba.todo
+    - file: B162-just-rtest-with-a-name-filter.todo
