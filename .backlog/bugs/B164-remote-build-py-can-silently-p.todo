@@ -60,3 +60,5 @@ Same family as B147 (a sync-back that reported success while leaving the previou
 artefact in place with a plausible mtime). Both are "the instrument returned an
 artefact from the wrong point in time, and nothing downstream could tell".
 Belongs in `scripts/remote-build.py` and the sweep harness, not in a lane.
+
+Decision 2026-09-01: serial tooling lane with B167 because both change scripts/remote-build.py and remote-tree lifecycle. Implement B164 first so commit/artefact identity is trustworthy before cleanup automation. Stamp and validate the claimed baseline commit; do not rely on base != fixed or hashes alone.
