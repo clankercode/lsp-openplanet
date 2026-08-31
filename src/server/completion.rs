@@ -2216,6 +2216,59 @@ mod b088_enum_values_after_colon_colon {
     }
 }
 
+/// B133: enum-value documentation is a property of the VALUE, not only of
+/// the enum that owns it. The completion item is the first user-facing
+/// consumer; a field populated only in the index would repeat B125.
+#[cfg(test)]
+mod b133_enum_value_docs {
+    use super::*;
+
+    fn core_index() -> crate::typedb::TypeIndex {
+        let mut idx = crate::typedb::TypeIndex::new();
+        let db: crate::typedb::core_format::CoreDatabase =
+            serde_json::from_value(serde_json::json!({
+                "op": "1.0",
+                "enums": [{"name": "E", "values": {
+                    "Documented": {"v": 1, "d": "The documented value."},
+                    "Plain": {"v": 2}
+                }}]
+            }))
+            .expect("fake core db");
+        idx.add_core(&db);
+        idx
+    }
+
+    #[test]
+    fn core_enum_completion_documents_one_value_and_leaves_the_common_fallback_plain() {
+        let idx = core_index();
+        let items = complete_namespace_members("E", Some(&idx), None);
+        let documented = items.iter().find(|i| i.label == "Documented").unwrap();
+        assert_eq!(
+            documented.documentation,
+            Some(Documentation::String("The documented value.".into()))
+        );
+        let plain = items.iter().find(|i| i.label == "Plain").unwrap();
+        assert_eq!(plain.documentation, None);
+    }
+
+    #[test]
+    fn nadeo_enum_completion_without_value_docs_stays_usable_and_plain() {
+        let fixtures =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+        let idx = crate::typedb::TypeIndex::load(
+            &fixtures.join("OpenplanetCore.json"),
+            &fixtures.join("OpenplanetNext.json"),
+        )
+        .expect("typedb fixtures");
+        let items = complete_namespace_members("CGameMenu::EMenuOrder", Some(&idx), None);
+        assert!(!items.is_empty(), "fixture Nadeo enum must have values");
+        assert!(
+            items.iter().all(|i| i.documentation.is_none()),
+            "the Nadeo dump supplies no per-value docs: {items:?}"
+        );
+    }
+}
+
 /// B099: every member offered after `Ns::` was labelled `FUNCTION`.
 ///
 /// Reported by B088 rather than fixed there, because the information is

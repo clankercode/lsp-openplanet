@@ -2501,6 +2501,41 @@ mod tests {
         assert_eq!(ws, ext, "enum hover diverges between paths");
     }
 
+    #[test]
+    fn hover_external_enum_value_shows_its_doc_without_interpreting_it_as_markdown() {
+        let idx = typedb(serde_json::json!({
+            "op": "1.0",
+            "enums": [{"name": "E", "values": {
+                "Documented": {
+                    "v": 7,
+                    "d": "Use *literal* <value> and [brackets]."
+                }
+            }}]
+        }));
+        let md = hover_external_md("void main() { E::Documented; }", "Documented", 1, &idx);
+        assert!(
+            md.contains("E::Documented = 7"),
+            "missing value identity: {md:?}"
+        );
+        assert!(
+            md.contains(r"Use \*literal\* &lt;value&gt; and \[brackets\]."),
+            "typedb prose must not become markdown/HTML: {md:?}"
+        );
+    }
+
+    #[test]
+    fn hover_external_enum_value_without_a_doc_still_shows_the_value() {
+        let idx = typedb(serde_json::json!({
+            "op": "1.0",
+            "enums": [{"name": "E", "values": {"Plain": {"v": 3}}}]
+        }));
+        let md = hover_external_md("void main() { E::Plain; }", "Plain", 1, &idx);
+        assert!(
+            md.contains("E::Plain = 3"),
+            "missing plain value hover: {md:?}"
+        );
+    }
+
     // === B054: interface members on the pool ==============================
     //
     // Hover's `receiver.member` step has worked since B033, but it reads
