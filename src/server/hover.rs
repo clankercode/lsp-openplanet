@@ -815,10 +815,18 @@ fn typedb_params(params: &[ParamInfo]) -> Vec<HoverParam> {
         .map(|p| {
             let mut ty = p.type_name.trim().to_string();
             // Core `typedecl` text carries neither `const` nor the `&`
-            // decoration — the `typeflags` bits are authoritative there;
-            // Nadeo signature text already carries both, so only add what is
-            // missing.
-            if p.is_const && !ty.contains("const") {
+            // decoration — the `typeflags` bits are authoritative there.
+            //
+            // B142 corrects what this said about the other half. It claimed
+            // "Nadeo signature text already carries both". Measured, it
+            // carries NEITHER a `const` (0 of 1387 arg strings) nor an
+            // in/out/inout marker; 56 do carry a bare `&`, which is why the
+            // `contains('&')` guard below still earns its place. So a Nadeo
+            // parameter's constness is UNKNOWN rather than absent, and
+            // `Some(true)` is the only thing that may add the prefix —
+            // `None` must render exactly as it did when the loader was
+            // asserting `false`.
+            if p.is_const == Some(true) && !ty.contains("const") {
                 ty.insert_str(0, "const ");
             }
             if !ty.contains('&') {
