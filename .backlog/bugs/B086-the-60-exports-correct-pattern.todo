@@ -1,0 +1,82 @@
+---
+complexity: medium
+created_at: "2026-08-31T04:59:59Z"
+depends_on: []
+estimate_hours: 1
+id: B086
+priority: high
+status: pending
+tags: []
+title: The 60-exports-correct-pattern fixture documents a stub shape the engine rejects, and it was cited as evidence twice
+updated_at: "2026-08-31T04:59:59Z"
+---
+Found 2026-08-31 by lane-b060-b062, by game probe, while correcting a claim it
+had itself committed on the strength of this fixture.
+
+## The defect
+
+`tests/fixtures/.../60-exports-correct-pattern` pairs
+
+    import string SendEvent(string a, string b) from "T";        // stub
+    string SendEvent(const string &in a, const string &in b)     // body
+
+and its comment calls this the **CORRECT pattern**. It is not. Probed against
+Openplanet 1.29.5 with two plugins (an exporter holding the body and declaring
+the stub, and a consumer importing it):
+
+| variant | stub vs body | engine |
+|---|---|---|
+| exact | `const string &in` matching the body | **binds and runs** |
+| lax | `string` by value over a `const string &in` body | **`Unbound function called`** |
+| control | names a function that does not exist | `Unbound function called` |
+
+So a consumer calling the fixture's own declared shape dies at runtime. The
+fixture asserts a false claim about the engine.
+
+## Why this is worth fixing rather than tolerating
+
+**It is load-bearing, and it has already produced two wrong conclusions.** The
+lane cited it as evidence that the engine's binding is lax, and wrote that
+justification into a shipped comment; the coordinator accepted the same
+reasoning when approving B062's matching rule. Both were wrong, and both were
+wrong *because the fixture said so*. A future lane reading it would reach the
+same place.
+
+The fixture was evidently never game-probed. That is the general hazard: **a
+fixture comment asserting engine behaviour is a claim, not a measurement, and
+it is trusted exactly like a measurement by everyone downstream.**
+
+Note what caught it. The lane's first probe had only the `lax` and `control`
+variants, and both failed identically — an oracle that cannot discriminate,
+which it would have been entitled to read as "the engine is strict" without
+having measured anything. Only adding the `exact` positive control made it a
+measurement, because `exact` binds and the sole difference from `lax` is the
+parameter type.
+
+## Work
+
+Two decisions, neither taken:
+
+1. Whether the stub should be corrected to `const string &in a, const string
+   &in b` so the fixture documents a pattern that actually binds.
+2. Whether anything else asserts against its current shape. Other tests
+   reference this fixture, and it is not lane-b060-b062's to change, which is
+   why it was flagged rather than edited.
+
+Prefer correcting it, and add a line to the fixture comment recording that the
+shape is game-probed and on which Openplanet version — so the next reader can
+tell a measured claim from an assumed one.
+
+## Sweep, per repo CLAUDE.md
+
+While correcting one signature, check the other export fixtures for the same
+assumption rather than fixing this row alone: `&out`, non-const references,
+handle parameters `T@`, `T@ &in`, defaulted parameters, and typedef'd types are
+all places where a stub could differ from its body and where nothing currently
+establishes what the engine does.
+
+## Related
+
+B062 (whose matching rule is a deliberate under-approximation and is unaffected
+either way — it matches on name and arity, never on types), B084,
+`docs/verification-hazards.md`.
