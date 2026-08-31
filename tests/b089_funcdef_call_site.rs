@@ -146,10 +146,14 @@ void MakeIt(int x) { int y = x; }
 
 void TakeOne(Maker@ cb) { }
 
-// An overload SET. It is written on a class deliberately — see
-// `a_workspace_free_function_overload_set_is_a_different_gap` below: a
-// free-function set never reaches any argument check, so a set written that
-// way would assert its silence vacuously.
+// An overload SET. It is written on a class deliberately, and that was
+// LOAD-BEARING when this file was written — see
+// `a_workspace_free_function_overload_set_is_checked_since_b100` below: a
+// free-function set then reached no argument check at all, so a set written
+// that way would have asserted its silence vacuously. B100 has since given
+// the free-function paths an entry point, so either spelling would work
+// today; the class stays because that is what this file's numbers were
+// measured against.
 class Both {
     void Go(Maker@ cb) { }
     void Go(int v) { int y = v; }
@@ -189,13 +193,19 @@ fn acceptance_exactly_two_errors_and_four_silences() {
 // ---------------------------------------------------------------------------
 // The over-firing gate on its own, so a failure names the cause.
 //
-// All of these use METHODS. Measured, not assumed: a workspace FREE-function
-// overload set never reaches `resolve_workspace_function_call` at all, because
+// All of these use METHODS, and at the time that was the only way to write
+// them. Measured, not assumed: a workspace FREE-function overload set then
+// never reached `resolve_workspace_function_call` at all, because
 // `lookup_function_return` returns `None` the moment two workspace symbols
 // share a name. A silence test written on a free-function set would therefore
-// pass without the set logic ever running — Mechanism 3, an oracle that cannot
-// discriminate what it asserts. `a_workspace_free_function_overload_set_is_a_
-// different_gap` pins that separately so the reason is on the record.
+// have passed without the set logic ever running — Mechanism 3, an oracle
+// that cannot discriminate what it asserts.
+//
+// B100 has since closed that, and
+// `a_workspace_free_function_overload_set_is_checked_since_b100` below is the
+// flip. These stay on methods: they were measured that way, and re-spelling a
+// green test buys nothing. The free-function generalisation lives in
+// `tests/b100_free_function_overload_set.rs`.
 // ---------------------------------------------------------------------------
 
 /// One candidate's funcdef matching keeps the call alive. This is THE test
@@ -288,20 +298,27 @@ fn a_mixed_set_stays_silent_because_the_non_funcdef_candidate_is_neutral() {
     );
 }
 
-/// PRE-EXISTING, SEPARATE GAP, pinned so the silence above is not read as
-/// this ticket's doing. A workspace FREE-function overload set reaches no
-/// argument check of any kind: `lookup_function_return` refuses as soon as
-/// two workspace symbols share the name, so `call_type` falls through to the
-/// `has_global_ident` arm and only walks the arguments. Arity, primitive
-/// types and funcdef slots are all unchecked there.
+/// THE GAP THIS TEST PINNED IS CLOSED, and this is the positive it said it
+/// should become.
 ///
-/// Closing that is a different change from this one — it means giving the
-/// Ident-callee path an overload-set entry point — and it is reported
-/// separately. If this test ever starts failing because the call DOES error,
-/// that gap was closed and this assertion should become the positive.
+/// It used to `assert_accepted`, recording a PRE-EXISTING, SEPARATE gap so
+/// that the silence above was not read as B089's doing: a workspace
+/// FREE-function overload set reached no argument check of any kind, because
+/// `lookup_function_return` refuses as soon as two workspace symbols share
+/// the name and `call_type` then fell through to the `has_global_ident` arm,
+/// which only walks the arguments. Its own doc said "if this test ever starts
+/// failing because the call DOES error, that gap was closed and this
+/// assertion should become the positive". B100 closed it by giving the
+/// Ident- and `NamespaceAccess`-callee paths an overload-set entry point into
+/// the same resolver the method path already used, and this is that flip.
+///
+/// The generalisation — three spellings, three axes, and the over-firing
+/// gates — lives in `tests/b100_free_function_overload_set.rs`. This one stays
+/// here, in the file whose reasoning depended on it, so a reader who follows
+/// the comment above finds the current answer rather than the old one.
 #[test]
-fn a_workspace_free_function_overload_set_is_a_different_gap() {
-    assert_accepted(
+fn a_workspace_free_function_overload_set_is_checked_since_b100() {
+    assert_rejected(
         r#"
         funcdef void VoidMaker();
         funcdef int IntMaker();
@@ -310,7 +327,7 @@ fn a_workspace_free_function_overload_set_is_a_different_gap() {
         void Both(IntMaker@ cb) { }
         void Use() { Both(MakeString); }
         "#,
-        "a workspace FREE-function overload set, which no argument check reaches",
+        "a workspace FREE-function overload set, which B100 gave an entry point",
     );
 }
 

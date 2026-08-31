@@ -2627,6 +2627,61 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// B100: the free-function OVERLOAD-SET entry point that the
+    /// Ident-callee and `NamespaceAccess`-callee paths never had.
+    ///
+    /// `lookup_function_return` refuses as soon as two workspace symbols
+    /// share a name — the deliberate "ambiguous, say nothing" arm — and
+    /// every free-function route into
+    /// [`Self::resolve_workspace_function_call`] was gated behind it. So a
+    /// workspace free function with two or more overloads fell through to
+    /// the `has_global_ident` arm, which suppresses the undefined-identifier
+    /// diagnostic and only walks the arguments for their own errors:
+    /// nothing compared them to any signature, not arity, not types, not
+    /// funcdef slots. Workspace METHODS never had the hole, because they
+    /// produce real sets via `lookup_method_overloads_with_inheritance`.
+    ///
+    /// B084 fixed the CREDITING half of this same arm; this is the CHECKING
+    /// half. One restriction, two consequences.
+    ///
+    /// **Nothing new is decided here.** The set goes to the SAME resolver
+    /// the single-overload and method paths use, so a free-function set
+    /// answers with that resolver's existing rules rather than a second copy
+    /// of them — including its deliberate silence on a TYPE-driven no-match,
+    /// which is pinned in `tests/b100_free_function_overload_set.rs` against
+    /// the method path rather than left to be rediscovered.
+    ///
+    /// The guard asks `method_overloads_including_inherited` — the very call
+    /// the resolver makes — rather than a second lookup that could disagree
+    /// with it about what the set contains.
+    ///
+    /// Credits and types the call EXACTLY as the `has_global_ident` arm it
+    /// stands in front of: same `record_value_use_variants`, same
+    /// `TypeRepr::Error` sentinel. Returning the resolver's own type instead
+    /// would be a second, unmeasured change riding along on this one — the
+    /// unique-overload winner's return type would start flowing into member
+    /// chains and hover, which is not what this ticket measured.
+    fn try_workspace_overload_set_call(
+        &mut self,
+        display_name: &str,
+        qualified: &str,
+        args: &[CallArg],
+        callee_span: Span,
+    ) -> Option<TypeRepr> {
+        if self.method_overloads_including_inherited(qualified).len() < 2 {
+            return None;
+        }
+        self.record_value_use_variants(qualified);
+        self.resolve_workspace_function_call(
+            display_name,
+            qualified,
+            args,
+            callee_span,
+            TypeRepr::Error(String::new()),
+        );
+        Some(TypeRepr::Error(String::new()))
+    }
+
     fn resolve_workspace_function_call(
         &mut self,
         display_name: &str,
@@ -4175,6 +4230,20 @@ impl<'a> Checker<'a> {
                         self.walk_args(args);
                         return TypeRepr::Named(qualified);
                     }
+                    // B100: an overload set never satisfied the
+                    // `lookup_function_return` at the top of this iteration,
+                    // so it arrived here — checked by nothing. Ahead of the
+                    // arm that swallows it, and behind everything else, so
+                    // the only calls it intercepts are the ones that were
+                    // reaching that arm.
+                    if let Some(t) = self.try_workspace_overload_set_call(
+                        &name,
+                        &qualified,
+                        args,
+                        callee.span,
+                    ) {
+                        return t;
+                    }
                     if self.scope.has_global_ident(&qualified) {
                         self.record_value_use_variants(&qualified);
                         self.walk_args(args);
@@ -4334,6 +4403,15 @@ impl<'a> Checker<'a> {
                 // module's stated preference, and they cannot mask a real
                 // finding here: reaching this arm means the ladder already
                 // failed to find `Ns::name` at every enclosing depth.
+                // B100: the top-level twin of the ladder's entry point. Same
+                // position for the same reason — immediately in front of the
+                // arm that was swallowing these calls, behind every other
+                // resolution, so nothing else changes hands.
+                if let Some(t) =
+                    self.try_workspace_overload_set_call(&name, &name, args, callee.span)
+                {
+                    return t;
+                }
                 if self.scope.has_global_ident(&name) {
                     self.record_value_use_variants(&name);
                     self.walk_args(args);
@@ -4602,6 +4680,17 @@ impl<'a> Checker<'a> {
                 }
                 if let Some(ty) = self.try_funcdef_ctor(&qual, args, callee.span) {
                     return ty;
+                }
+                // B100: the `NS::Fn(...)` spelling of the same gap — gated
+                // behind the same `lookup_function_return` above, and reaching
+                // the same `has_global_ident` arm below. It goes AHEAD of the
+                // `walk_args` on the next line rather than beside the arm it
+                // guards, because the resolver walks the arguments itself and
+                // walking them twice would double every nested diagnostic.
+                if let Some(t) =
+                    self.try_workspace_overload_set_call(display, &qual, args, callee.span)
+                {
+                    return t;
                 }
                 self.walk_args(args);
                 if self.scope.has_type(&qual) {
@@ -6480,17 +6569,60 @@ void Main() {
         );
     }
 
+    /// **Corrected by B100**, which is why the name changed: an overloaded
+    /// call's arity is checked against the SET's range, not suppressed.
+    ///
+    /// This was `arg_count_overloaded_suppressed` and asserted that
+    /// `f()` against `f(int)` / `f(int, int)` reports nothing. That
+    /// suppression dates from iter 19/22, before overload resolution existed,
+    /// when the only available check was the single-overload `check_arg_count`
+    /// and running it per candidate would have invented errors on legal calls.
+    /// The resolver replaced it: `check_arity_against_ranges` fires only when
+    /// the count is outside EVERY candidate's range, so it cannot do that.
+    ///
+    /// The repo already held the corrected rule and tested it —
+    /// `inherited_overload_exceeding_all_arity_still_diagnoses` (GH #34 review
+    /// Arm B): "the augmented overload set must not silently swallow a
+    /// genuinely-wrong call the pre-#34 single-overload path caught". Two
+    /// tests in this file asserted opposite things about one rule, and this
+    /// one survived only because a workspace FREE-function set never reached
+    /// the resolver at all — B100's gap. It was passing for a reason nobody
+    /// had identified.
+    ///
+    /// Both halves are kept, because the suppression was guarding something
+    /// real: a call INSIDE some candidate's range must still be silent, and
+    /// the reported range must be the SET's (1..2), not one candidate's.
     #[test]
-    fn arg_count_overloaded_suppressed() {
+    fn arg_count_overloaded_uses_the_sets_arity_range() {
+        let in_range =
+            check("void f(int a) {} void f(int a, int b) {} void main() { f(1); f(1, 2); }");
+        assert!(
+            !in_range
+                .iter()
+                .any(|d| matches!(&d.kind, TypeDiagnosticKind::ArgCountMismatch { .. })),
+            "a call matching ANY candidate must stay silent — this is what the \
+             old suppression was really protecting: {in_range:?}"
+        );
+
         let diags = check("void f(int a) {} void f(int a, int b) {} void main() { f(); }");
         let bad: Vec<_> = diags
             .iter()
             .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgCountMismatch { .. }))
             .collect();
-        assert!(
-            bad.is_empty(),
-            "expected no ArgCountMismatch for overloaded call, got {:?}",
-            diags
+        assert_eq!(
+            bad.len(),
+            1,
+            "zero arguments is outside every candidate's range: {diags:?}"
+        );
+        assert_eq!(
+            bad[0].kind,
+            TypeDiagnosticKind::ArgCountMismatch {
+                function_name: "f".into(),
+                expected_min: 1,
+                expected_max: 2,
+                got: 0,
+            },
+            "and the range must span the SET, not one candidate: {diags:?}"
         );
     }
 
