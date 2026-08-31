@@ -43,9 +43,11 @@ pub(super) fn format_pretty(report: &CheckReport, color: bool) -> String {
     let mut n_warn = 0usize;
     let mut n_other = 0usize;
 
-    let mut blocks: Vec<String> = Vec::with_capacity(report.diagnostics.len());
+    // B090: INFO/HINT fold into the summary unless report.show_info.
+    let folded = super::FoldedDiagnostics::fold(report);
+    let mut blocks: Vec<String> = Vec::with_capacity(folded.visible.len());
 
-    for item in &report.diagnostics {
+    for item in &folded.visible {
         match item.diagnostic.severity {
             Some(DiagnosticSeverity::ERROR) | None => n_err += 1,
             Some(DiagnosticSeverity::WARNING) => n_warn += 1,
@@ -65,7 +67,7 @@ pub(super) fn format_pretty(report: &CheckReport, color: bool) -> String {
         blocks.join("\n")
     };
 
-    let summary = format_pretty_summary(report, color, n_err, n_warn, n_other);
+    let summary = format_pretty_summary(report, &folded, color, n_err, n_warn, n_other);
 
     if body.is_empty() {
         format!("{summary}\n")
@@ -76,6 +78,7 @@ pub(super) fn format_pretty(report: &CheckReport, color: bool) -> String {
 
 fn format_pretty_summary(
     report: &CheckReport,
+    folded: &super::FoldedDiagnostics<'_>,
     color: bool,
     n_err: usize,
     n_warn: usize,
@@ -84,6 +87,10 @@ fn format_pretty_summary(
     let root = term::path(color, report.root.display().to_string());
     if report.diagnostics.is_empty() {
         return format!("{} {}", term::ok(color, "✓ 0 diagnostics"), root);
+    }
+    // B090: everything folded — say so rather than claiming clean.
+    if let Some(all_hidden) = folded.all_hidden_summary() {
+        return format!("{} {}", term::ok(color, format!("✓ {all_hidden}")), root);
     }
 
     let mark = if n_err > 0 {
@@ -97,13 +104,10 @@ fn format_pretty_summary(
     let mut parts = vec![term::bold(
         color,
         format!(
-            "{} diagnostic{}",
-            report.diagnostics.len(),
-            if report.diagnostics.len() == 1 {
-                ""
-            } else {
-                "s"
-            }
+            "{} diagnostic{}{}",
+            folded.visible.len(),
+            if folded.visible.len() == 1 { "" } else { "s" },
+            folded.hidden_suffix()
         ),
     )];
     if n_err > 0 {
@@ -361,6 +365,7 @@ mod tests {
                 type_db: None,
                 errors: crate::config::ErrorGroup::Off,
                 targets: Vec::new(),
+                show_info: false,
             };
 
             let out = format_check_report_with(&report, false, CheckFormat::Pretty);
@@ -396,6 +401,7 @@ mod tests {
             type_db: None,
             errors: crate::config::ErrorGroup::Off,
             targets: Vec::new(),
+            show_info: false,
         };
 
         let out = format_check_report_with(&report, false, CheckFormat::Plain);
@@ -431,6 +437,7 @@ mod tests {
             type_db: None,
             errors: crate::config::ErrorGroup::Off,
             targets: Vec::new(),
+            show_info: false,
         };
 
         // color=false, format=pretty → pretty layout, no ANSI
@@ -482,6 +489,7 @@ mod tests {
             type_db: None,
             errors: crate::config::ErrorGroup::Off,
             targets: Vec::new(),
+            show_info: false,
         };
 
         let plainish = format_check_report_with(&report, false, CheckFormat::Auto);
@@ -511,6 +519,7 @@ mod tests {
             type_db: None,
             errors: crate::config::ErrorGroup::Off,
             targets: Vec::new(),
+            show_info: false,
         };
         let out = format_check_report_with(&report, false, CheckFormat::Pretty);
         assert!(

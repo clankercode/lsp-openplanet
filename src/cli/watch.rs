@@ -505,6 +505,7 @@ mod tests {
                 PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb"),
             ),
             no_typedb: false,
+            show_info: false,
             openplanet_version: None,
             typedb_versions_dir: None,
             plugins_dirs: Vec::new(),

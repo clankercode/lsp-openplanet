@@ -42,6 +42,7 @@ fn showcase_snapshot() -> Snapshot {
         path: root.clone(),
         typedb_dir: Some(typedb),
         no_typedb: false,
+        show_info: false,
         openplanet_version: None,
         typedb_versions_dir: None,
         plugins_dirs: Vec::new(),

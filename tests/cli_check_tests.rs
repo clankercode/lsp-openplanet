@@ -1180,6 +1180,12 @@ fn run_issue_repro(slug: &str) -> (bool, String, String) {
 /// Same as run_issue_repro but with the shared typedb fixtures — required
 /// for repros whose trigger involves engine API types (#38, #28).
 fn run_issue_repro_typedb(slug: &str) -> (bool, String, String) {
+    run_issue_repro_typedb_with(slug, &[])
+}
+
+/// B090: unused findings are info-and-folded by default; repros whose
+/// contract is counting `warning:` lines pin `--unused=warn` through here.
+fn run_issue_repro_typedb_with(slug: &str, extra: &[&str]) -> (bool, String, String) {
     let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/issue-repros")
         .join(slug);
@@ -1191,6 +1197,7 @@ fn run_issue_repro_typedb(slug: &str) -> (bool, String, String) {
         .arg("check")
         .arg("--typedb-dir")
         .arg(&typedb)
+        .args(extra)
         .arg(&fixture)
         .output()
         .unwrap();
@@ -3353,10 +3360,12 @@ fn check_command_unused_still_warns_when_omitted_files_do_not_use_it() {
         "void NobodyCallsThis() {}\nvoid UsedOnlyByOmitted() {}\nvoid Main() {}\n",
     )
     .unwrap();
-    let stdout = check_plugin(&root, &[]);
+    // B090: unused findings are info and folded by default; --show-info
+    // reveals them — this test is about usage crediting, not the fold.
+    let stdout = check_plugin(&root, &["--show-info"]);
     assert!(
         stdout.contains("`NobodyCallsThis` is never used"),
-        "a genuinely unused declaration must still warn; stdout={stdout:?}"
+        "a genuinely unused declaration must still be reported; stdout={stdout:?}"
     );
     assert!(
         !stdout.contains("UsedOnlyByOmitted"),
@@ -3392,7 +3401,7 @@ fn check_command_reports_no_diagnostics_inside_an_omitted_file() {
 #[test]
 fn check_command_unused_reports_the_omitted_caller_with_no_gitignore() {
     let root = omitted_caller_plugin("unused-no-gitignore", "omitted/\n", "", "");
-    let stdout = check_plugin(&root, &["--no-gitignore"]);
+    let stdout = check_plugin(&root, &["--no-gitignore", "--show-info"]);
     assert!(
         stdout.contains("`GenCaller` is never used"),
         "with honoring off the discovered file is checked; stdout={stdout:?}"
@@ -3443,30 +3452,51 @@ fn unused_mentions(stdout: &str) -> bool {
         || stdout.contains("`deadLocal`")
 }
 
-/// Default unused level is warn: findings print as warnings and do not fail
-/// the run. `--unused ignore` / `--no-unused` drop every kind. `--unused
-/// error` promotes them to errors (exit 1 without -Werror).
+/// B090: default unused level is INFO, and human output folds info-level
+/// findings into the summary — a normal run stays quiet, exit 0, with a
+/// hidden count naming `--show-info`. `--show-info` reveals them;
+/// `--unused warn` restores the old warning behavior; `--unused ignore` /
+/// `--no-unused` drop every kind; `--unused error` promotes them to
+/// errors (exit 1 without -Werror) and errors are never folded.
 #[test]
 fn check_command_unused_flag_ignore_warn_error_variants() {
     let root = unused_kinds_plugin("unused-levels");
 
     let (code, stdout) = check_plugin_status(&root, &[]);
-    assert_eq!(code, Some(0), "warnings-only is exit 0: {stdout}");
+    assert_eq!(code, Some(0), "info-only is exit 0: {stdout}");
     assert!(
-        unused_mentions(&stdout),
-        "default warn must report: {stdout}"
+        !unused_mentions(&stdout),
+        "default info must be folded out of the listing: {stdout}"
     );
     assert!(
-        stdout.contains("warning:"),
-        "default unused must be warnings: {stdout}"
+        stdout.contains("hidden") && stdout.contains("--show-info"),
+        "default run must summarize what it folded: {stdout}"
+    );
+    assert!(
+        stdout.contains("unused function"),
+        "hidden note breaks the count down by kind: {stdout}"
+    );
+
+    let (code, stdout) = check_plugin_status(&root, &["--show-info"]);
+    assert_eq!(code, Some(0), "--show-info keeps exit 0: {stdout}");
+    assert!(
+        unused_mentions(&stdout) && stdout.contains("info:"),
+        "--show-info reveals the findings at info severity: {stdout}"
+    );
+
+    let (code, stdout) = check_plugin_status(&root, &["--unused=warn"]);
+    assert_eq!(code, Some(0), "warnings-only is exit 0: {stdout}");
+    assert!(
+        unused_mentions(&stdout) && stdout.contains("warning:"),
+        "--unused=warn restores visible warnings: {stdout}"
     );
 
     for flag in ["--no-unused", "--unused=ignore", "--unused=off"] {
         let (code, stdout) = check_plugin_status(&root, &[flag]);
         assert_eq!(code, Some(0), "{flag} exit: {stdout}");
         assert!(
-            !unused_mentions(&stdout),
-            "{flag} must silence unused function/var/class/local: {stdout}"
+            !unused_mentions(&stdout) && !stdout.contains("hidden"),
+            "{flag} must silence unused entirely — nothing to fold: {stdout}"
         );
     }
 
@@ -3479,10 +3509,10 @@ fn check_command_unused_flag_ignore_warn_error_variants() {
     );
 }
 
-/// B030: `hint` / `info` report the same findings at a quieter severity —
-/// exit 0, labelled `hint:` / `info:`, counted as "other" rather than
-/// warnings, and NOT promoted by `--warnings-as-errors` (which only
-/// promotes WARNING).
+/// B030 + B090: `hint` / `info` findings never fail the run, and human
+/// output now FOLDS them into the summary by default — `--show-info`
+/// reveals them labelled `hint:` / `info:`, counted as "other" rather
+/// than warnings. `--warnings-as-errors` still promotes WARNING only.
 #[test]
 fn check_command_unused_quiet_levels_are_reported_but_never_fail() {
     let root = unused_kinds_plugin("unused-quiet-levels");
@@ -3493,15 +3523,28 @@ fn check_command_unused_quiet_levels_are_reported_but_never_fail() {
         ("--unused=info", "info:"),
         ("--unused=note", "info:"),
     ] {
+        // Folded by default: quiet severities leave only the hidden note.
         let (code, stdout) = check_plugin_status(&root, &[flag]);
         assert_eq!(code, Some(0), "{flag} must not fail the run: {stdout}");
         assert!(
+            !unused_mentions(&stdout),
+            "{flag} findings fold out of the listing: {stdout}"
+        );
+        assert!(
+            stdout.contains("hidden") && stdout.contains("--show-info"),
+            "{flag} folded findings must be summarized: {stdout}"
+        );
+
+        // --show-info restores the pre-B090 listing contract.
+        let (code, stdout) = check_plugin_status(&root, &[flag, "--show-info"]);
+        assert_eq!(code, Some(0), "{flag} --show-info must not fail: {stdout}");
+        assert!(
             unused_mentions(&stdout),
-            "{flag} must still report the findings: {stdout}"
+            "{flag} --show-info must report the findings: {stdout}"
         );
         assert!(
             stdout.contains(label),
-            "{flag} must label findings `{label}`: {stdout}"
+            "{flag} --show-info must label findings `{label}`: {stdout}"
         );
         assert!(
             !stdout.contains("warning:"),
@@ -3691,8 +3734,11 @@ fn check_command_groups_errors_last_first_off_plain_pretty_json() {
     let last = [MIXED_WARN_A, MIXED_WARN_B, MIXED_ERR];
     let first = [MIXED_ERR, MIXED_WARN_A, MIXED_WARN_B];
 
+    // B090: the fixture's "warnings" are unused findings, info-by-default
+    // now — pin them at warn so this stays a grouping test of visible
+    // warnings vs errors.
     for format in ["plain", "pretty"] {
-        let (code, stdout) = check_plugin_status(&root, &["--format", format]);
+        let (code, stdout) = check_plugin_status(&root, &["--format", format, "--unused=warn"]);
         assert_eq!(code, Some(1), "default {format} exit: {stdout}");
         assert_eq!(
             mixed_marker_order(&stdout),
@@ -3708,7 +3754,10 @@ fn check_command_groups_errors_last_first_off_plain_pretty_json() {
             "default {format} trailer is last: {stdout}"
         );
 
-        let (code, stdout) = check_plugin_status(&root, &["--format", format, "--errors", "first"]);
+        let (code, stdout) = check_plugin_status(
+            &root,
+            &["--format", format, "--errors", "first", "--unused=warn"],
+        );
         assert_eq!(code, Some(1), "{format} --errors first: {stdout}");
         assert_eq!(
             mixed_marker_order(&stdout),
@@ -3716,7 +3765,10 @@ fn check_command_groups_errors_last_first_off_plain_pretty_json() {
             "{format} --errors first: {stdout}"
         );
 
-        let (code, stdout) = check_plugin_status(&root, &["--format", format, "--errors=off"]);
+        let (code, stdout) = check_plugin_status(
+            &root,
+            &["--format", format, "--errors=off", "--unused=warn"],
+        );
         assert_eq!(code, Some(1), "{format} --errors=off: {stdout}");
         assert_eq!(
             mixed_marker_order(&stdout),
@@ -3755,21 +3807,29 @@ fn check_command_errors_config_and_flag_precedence() {
     let root = mixed_severity_plugin("errors-config");
     fs::write(root.join(".openplanet-lsp.toml"), "errors = \"first\"\n").unwrap();
 
-    let (_, stdout) = check_plugin_status(&root, &["--format", "plain"]);
+    // B090: pin unused at warn — the fixture's warnings are unused
+    // findings, and this test is about `errors` precedence, not the fold.
+    let (_, stdout) = check_plugin_status(&root, &["--format", "plain", "--unused=warn"]);
     assert_eq!(
         mixed_marker_order(&stdout),
         [MIXED_ERR, MIXED_WARN_A, MIXED_WARN_B],
         "workspace errors=first: {stdout}"
     );
 
-    let (_, stdout) = check_plugin_status(&root, &["--format", "plain", "--errors", "last"]);
+    let (_, stdout) = check_plugin_status(
+        &root,
+        &["--format", "plain", "--errors", "last", "--unused=warn"],
+    );
     assert_eq!(
         mixed_marker_order(&stdout),
         [MIXED_WARN_A, MIXED_WARN_B, MIXED_ERR],
         "flag last beats config first: {stdout}"
     );
 
-    let (_, stdout) = check_plugin_status(&root, &["--format", "plain", "--errors=off"]);
+    let (_, stdout) = check_plugin_status(
+        &root,
+        &["--format", "plain", "--errors=off", "--unused=warn"],
+    );
     assert_eq!(
         mixed_marker_order(&stdout),
         [MIXED_WARN_A, MIXED_ERR, MIXED_WARN_B],
@@ -3777,7 +3837,7 @@ fn check_command_errors_config_and_flag_precedence() {
     );
 
     fs::write(root.join(".openplanet-lsp.toml"), "errors = \"off\"\n").unwrap();
-    let (_, stdout) = check_plugin_status(&root, &["--format", "plain"]);
+    let (_, stdout) = check_plugin_status(&root, &["--format", "plain", "--unused=warn"]);
     assert_eq!(
         mixed_marker_order(&stdout),
         [MIXED_WARN_A, MIXED_ERR, MIXED_WARN_B],
@@ -3785,7 +3845,7 @@ fn check_command_errors_config_and_flag_precedence() {
     );
 
     fs::write(root.join(".openplanet-lsp.toml"), "errors = \"end\"\n").unwrap();
-    let (_, stdout) = check_plugin_status(&root, &["--format", "pretty"]);
+    let (_, stdout) = check_plugin_status(&root, &["--format", "pretty", "--unused=warn"]);
     assert_eq!(
         mixed_marker_order(&stdout),
         [MIXED_WARN_A, MIXED_WARN_B, MIXED_ERR],
@@ -4611,7 +4671,9 @@ fn check_command_const_handle_declaration_is_anchored_at_the_const_keyword() {
         ),
     )
     .unwrap();
-    let stdout = check_plugin(&root, &[]);
+    // B090: pin unused at warn — the pinned `line:col: warning:` strings
+    // are the point of this test, not the default severity.
+    let stdout = check_plugin(&root, &["--unused=warn"]);
     for (line, name) in [
         (3, "Handle"),
         (4, "HandleArray"),
@@ -4901,7 +4963,8 @@ fn check_command_issue_repro_b059_injected_methods_silences_only_the_legal_half(
 /// Fixture: 13 warnings before the fix, 6 after.
 #[test]
 fn check_command_issue_repro_b061_property_read_credits_accessor() {
-    let (_, stdout, stderr) = run_issue_repro_typedb("b061-property-read-credits-accessor");
+    let (_, stdout, stderr) =
+        run_issue_repro_typedb_with("b061-property-read-credits-accessor", &["--unused=warn"]);
     let warnings: Vec<&str> = stdout.lines().filter(|l| l.contains("warning:")).collect();
 
     // Exactly these must SURVIVE — nothing reads them.
@@ -5100,7 +5163,8 @@ fn check_command_issue_repro_b094_interface_not_implemented() {
 /// closed as well.
 #[test]
 fn check_command_issue_repro_b087_shared_and_exported_roots() {
-    let (_, stdout, stderr) = run_issue_repro_typedb("b087-shared-and-exported-roots");
+    let (_, stdout, stderr) =
+        run_issue_repro_typedb_with("b087-shared-and-exported-roots", &["--unused=warn"]);
     let warnings: Vec<&str> = stdout.lines().filter(|l| l.contains("warning:")).collect();
 
     // Every survivor is a deliberate control.
@@ -5215,7 +5279,8 @@ fn check_command_issue_repro_b087_shared_and_exported_roots() {
 /// 6 warnings before, 3 after.
 #[test]
 fn check_command_issue_repro_b062_manifest_exports_root_unused() {
-    let (_, stdout, stderr) = run_issue_repro_typedb("b062-manifest-exports-root-unused");
+    let (_, stdout, stderr) =
+        run_issue_repro_typedb_with("b062-manifest-exports-root-unused", &["--unused=warn"]);
     let warnings: Vec<&str> = stdout.lines().filter(|l| l.contains("warning:")).collect();
 
     let expected = [
