@@ -45,3 +45,43 @@ Confirm no selftest, mutation harness or doc example depends on it —
 `check_probe_cleanup_nonvacuous.py` and `check_enum_probe_nonvacuous.py` both
 exercise reader behaviour, and a grep across `scripts/` and `docs/` is the whole
 verification. Small ticket; the only way to get it wrong is not to look.
+
+
+## CORRECTION — this ticket was filed on a wrong premise, 2026-09-01
+
+**"No production callers left" was WRONG when I filed it.** lane-resolver
+reported it after B123, its grep having matched a **local variable of the same
+name** in `issue_repro_game`. `fleet_dogfood.probe_one` was still calling
+`read_log_window` — and that call site held the WORST instance of the very
+defect B118 and B127 exist to close. B127 has since fixed that caller.
+
+The lane reported the error against itself. **A claim that a grep found "the
+last" of something is worth re-running before it becomes a ticket** — recorded
+in the hazards catalogue.
+
+## The ticket still stands, with one caller fewer. But the DECISION has changed.
+
+**Prefer "document as test-only" over "remove".**
+
+`check_enum_probe_nonvacuous.py` deliberately reverts a call site **to**
+`read_log_window` as one of its mutations. Deleting the function would break that
+mutation's anchor — and it would do so by making the mutation unbuildable rather
+than by making it fail, so **a guard would be quietly lost rather than reported
+as broken.**
+
+That is the deciding argument and it should be settled before someone deletes it
+on the tidy-up reading of the original title.
+
+## Deliverable
+
+1. Confirm by measurement, not grep alone, which callers remain. Run the callers,
+   do not just search for the name — that is what produced the wrong premise
+   above.
+2. Document it in its own docstring as **test-only, retained deliberately as a
+   mutation anchor**, naming `check_enum_probe_nonvacuous.py`.
+3. Say in the docstring WHY the raw reader is the default and what the filter
+   costs: both build markers are `[ TRAC]`, so `build_slice` returns zero lines
+   from a filtered window, which is why the build-health check cannot exist on
+   top of it.
+4. Pin it — a test asserting no production path reaches it, so a future caller
+   has to come here and argue rather than drift back.
