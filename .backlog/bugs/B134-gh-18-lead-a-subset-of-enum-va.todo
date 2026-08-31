@@ -1,4 +1,6 @@
 ---
+claimed_at: "2026-08-31T16:56:56Z"
+claimed_by: cli-user
 completed_at: null
 complexity: medium
 created_at: "2026-08-31T14:43:15Z"
@@ -6,11 +8,11 @@ depends_on: []
 estimate_hours: 1
 id: B134
 priority: high
-started_at: null
-status: pending
+started_at: "2026-08-31T16:56:56Z"
+status: in_progress
 tags: []
 title: 'GH #18 lead: a subset of enum value doc strings are migration hints (''Please use X instead'') — prose rather than structured metadata, but the only deprecation-shaped text in the dumps'
-updated_at: "2026-08-31T14:43:15Z"
+updated_at: "2026-08-31T16:56:56Z"
 ---
 
 GH #18 lead: a subset of enum value doc strings are migration hints ('Please use X instead') — prose rather than structured metadata, but the only deprecation-shaped text in the dumps
