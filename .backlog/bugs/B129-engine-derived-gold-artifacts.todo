@@ -44,3 +44,13 @@ f. Every regenerated artifact records game + Openplanet version and date; the ru
 
 CONSTRAINTS: needs a live Trackmania + Openplanet session; runtime dominated by the b052 (1901 rows) and b053 (2989 rows) corpora.
 COORDINATION: probe harness is largely the peer fleet's construction (B068/B077/B097/B118 guard chain); unclaimed — either fleet may take it; schedule AFTER B122 (repo-wide fmt commit) to avoid churn.
+
+COORDINATOR APPEND (2026-09-01, post-acceptance): peer fleet (claude-mortar-vicar-eqog) has taken this ticket. Three spec refinements agreed via c2c, binding on the implementer:
+
+1. MANIFEST GAINS A THIRD COLUMN: the QUESTION each artifact answers, alongside artifact -> generator -> version -> rowcount. Rationale (measured twice tonight): B118 and B123 both produced probes whose OUTPUT was right while their stated REASON was wrong; a regen preserves outputs and cannot re-derive intent, so the question field is the one that goes stale silently. Record it explicitly.
+
+2. SELFTEST GATING TIGHTENED: per-guard KILL evidence, not suite-level green and not positive-control pairs. B118's lane had 4 of 9 guards vacuous with all four control pairs passing — earlier chain checks had already decided each case. The regen gate requires: (a) each guard dies under its own one-axis mutation and survives the others, and (b) an OVER-CONDEMN mutation — a probe that fails everything must FAIL the gate, since a guard that fires on both halves is as broken as one that fires on neither. Working models: fleet teardown selftest (21/21 mutations caught) and run_batch verdict chain (10/10).
+
+3. ENGINE METHOD CONSTNESS IS IN SCOPE FROM DAY ONE: as of B124/B125, 301 of 1002 Core method decls parse a trailing ' const' from the typedb dumps (previously hardwired false — 'void M()' and 'void M() const' rendered identically). The drift report can now see an engine method gaining/losing its const qualifier between Openplanet versions, which is exactly the ABI-change class this ticket exists to catch. Manifest it.
+
+On the open design question (in-source hand-measured tables): peer's instinct is v1 enumerates them manually rather than auto-regenerating — a hand-measured table encodes human scope judgement that silent regeneration would destroy — but will MEASURE the inventory before committing, and append findings here. Enumeration at minimum makes them answer to the drift report as UNCHECKED rather than invisible.
