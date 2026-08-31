@@ -1,0 +1,14 @@
+---
+complexity: medium
+created_at: "2026-08-31T16:28:07Z"
+depends_on: []
+estimate_hours: 1
+id: B154
+priority: high
+status: pending
+tags: []
+title: 'probe_export_binding has a selftest and no mutation harness anywhere: surfaced by a discovery check that now parses scripts/ instead of trusting a hardcoded list'
+updated_at: "2026-08-31T16:28:07Z"
+---
+
+probe_export_binding has a selftest and no mutation harness anywhere: surfaced by a discovery check that now parses scripts/ instead of trusting a hardcoded list
