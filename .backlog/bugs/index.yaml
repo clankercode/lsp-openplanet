@@ -87,3 +87,4 @@ bugs:
     - file: B086-the-60-exports-correct-pattern.todo
     - file: B087-exported-functions-and-shared.todo
     - file: B088-extension-did-not-get-suggesti.todo
+    - file: B089-a-funcdef-typed-parameter-acce.todo

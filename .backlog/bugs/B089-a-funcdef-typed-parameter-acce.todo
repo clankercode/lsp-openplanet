@@ -1,0 +1,26 @@
+---
+complexity: medium
+created_at: "2026-08-31T08:04:42Z"
+depends_on: []
+estimate_hours: 1
+id: B089
+priority: high
+status: pending
+tags: []
+title: A funcdef-typed parameter accepts a mismatched function at a workspace call site
+updated_at: "2026-08-31T08:04:42Z"
+---
+
+# A funcdef-typed parameter accepts a mismatched function at a workspace call site
+
+## Steps to Reproduce
+
+1. TODO: Add steps
+
+## Expected Behavior
+
+TODO: Describe expected behavior
+
+## Actual Behavior
+
+TODO: Describe actual behavior
