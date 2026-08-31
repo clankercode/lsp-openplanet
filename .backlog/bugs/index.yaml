@@ -101,3 +101,5 @@ bugs:
     - file: B100-a-workspace-free-function-over.todo
     - file: B101-method-constness-is-absent-fro.todo
     - file: B102-array-t-sort-sortnonconst-call.todo
+    - file: B103-go-to-definition-on-virtual-pr.todo
+    - file: B104-go-to-definition-on-interface.todo

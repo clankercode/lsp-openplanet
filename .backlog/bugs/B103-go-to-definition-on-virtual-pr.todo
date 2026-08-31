@@ -1,0 +1,52 @@
+---
+complexity: medium
+created_at: "2026-08-31T10:17:25Z"
+depends_on: []
+estimate_hours: 2
+id: B103
+priority: high
+status: pending
+tags: []
+title: Go to definition on virtual property access (obj.ID) does not resolve to get_ID/set_ID
+updated_at: "2026-08-31T10:17:25Z"
+---
+## Expected Behavior
+
+Go-to-definition on the member name in a virtual property access resolves
+to the accessor method(s) on the declaring class:
+
+- `obj.ID` in a READ position → `uint get_ID()` on the class.
+- `obj.ID = x` (write position) → `set_ID(...)` when it exists (else
+  `get_ID` as fallback).
+- Compound assignment (`obj.ID += 1`) reads AND writes → offer both
+  accessors (LSP definition responses may be an array).
+
+## Actual Behavior
+
+Go-to-definition on `ID` in `obj.ID` resolves nothing (or falls through)
+— `src/server/navigation.rs` has no `get_`/`set_` accessor mapping in its
+definition path at all. The checker already understands the pairing
+(ReadOnlyProperty diagnostics; B061 credits `get_X`/`set_X` usage from
+property reads/writes), so the resolution logic exists in the workspace —
+navigation just never consults it.
+
+## Generalize (repo convention)
+
+- Workspace class accessors (the motivating case).
+- Namespace-level virtual properties: `Ns::Thing` backed by
+  `Ns::get_Thing()` / `Ns::set_Thing()` (typedb has e.g.
+  `Time::get_MilliStamp`; workspace namespaces can declare the same
+  shape).
+- Inherited accessors: `get_ID` declared on a base class, accessed via a
+  derived-typed receiver.
+- Interface-declared accessors.
+- Negative control: a REAL field named `ID` must keep navigating to the
+  field declaration, never to a same-named accessor elsewhere.
+- Hover/signature-help on `obj.ID` may share the same resolution seam —
+  check while in there, but the ticket's bar is definition.
+
+## Notes
+
+Read-vs-write position detection already exists for the checker's
+ReadOnlyProperty / compound-assign handling — reuse that classification,
+do not re-derive it in the server layer.
