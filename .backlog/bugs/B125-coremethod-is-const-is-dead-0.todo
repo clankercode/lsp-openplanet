@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T14:11:35Z"
 depends_on: []
 estimate_hours: 1
 id: B125
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'CoreMethod.is_const is dead: 0 of 1002 typedb dumps populate it and serde(default) makes it silently answer false'
@@ -12,3 +14,37 @@ updated_at: "2026-08-31T14:11:35Z"
 ---
 
 CoreMethod.is_const is dead: 0 of 1002 typedb dumps populate it and serde(default) makes it silently answer false
+
+
+## Measured by lane-enum during B121, 2026-09-01
+
+`CoreMethod.is_const` exists in our struct and is **never populated**: 0 of 1002
+Core class methods in the typedb dumps carry a `const` key. `#[serde(default)]`
+makes it silently answer `false`.
+
+**This is exactly the trap B116 warned about**: a field that exists, greps
+cleanly, type-checks, and answers a confident wrong answer to anyone who assumes
+its presence means the data arrived. Nothing distinguishes "no engine method is
+const" from "we never read this".
+
+## Fix
+
+Either populate it from the `decl` string — 301 of 1002 decls end in ` const` —
+or **delete it**. Leaving a field that silently answers `false` is worse than
+having no field, because the absence would at least be visible at the call site.
+
+Deleting is the cheap, safe move and is a fine outcome on its own. Populating it
+is the same work as the sibling ticket on the stale `lookup_method_return`
+comment and **must not be done without that ticket's variant sweep** — a
+populated `is_const` immediately changes what the const-receiver rules can see,
+which is a new false-positive surface, not a no-op.
+
+If you delete it, leave a comment saying the data IS available in `decl` and
+naming the ticket, so the next person does not re-derive the 301.
+
+## Test axis
+
+Whichever way it goes, pin it: a test asserting either that the field is absent,
+or that it is populated and matches the ` const` suffix for a known method
+(`"string GetName() const"` → true, a known non-const → false). A dead field
+became invisible precisely because nothing asserted anything about it.
