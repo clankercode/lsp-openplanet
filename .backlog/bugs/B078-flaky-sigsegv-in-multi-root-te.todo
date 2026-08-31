@@ -189,3 +189,93 @@ makes every later run honest regardless of what the SIGSEGV turns out to be.
 
 `docs/verification-hazards.md` has been marked accordingly (master 0b47535)
 rather than rewritten to a fourth confident cause.
+
+## RESOLVED (2026-08-31, lane-b064): the SIGSEGV is not a defect in this project
+
+Measured from five preserved coredumps, reproducible from the cores alone via
+`parse_core.py` / `readmem.py`. Two independent proofs that stack exhaustion is
+refuted, neither needing the binary:
+
+- **`si_addr == rip` exactly, in all five cores.** A stack access faults at a
+  stack address. This faults at the instruction pointer, so it is an EXECUTE
+  fault.
+- **36 KiB of a 2052 KiB stack in use** — `rsp` is 0x9178 below the region top.
+  98% of the stack was untouched.
+
+Corroborated by a bisection run before the cores: the config-load path needs
+between 44 and 48 KiB (survives 48, dies at 44, one process per size). Against
+2052 KiB that is a 42x margin, consistent with the 36 KiB actually in use.
+
+**`SEGV_ACCERR` does not mean "guard page".** It means mapped-but-wrong-
+permission; the guard page is merely its most common cause. That inference was
+mine and it was wrong.
+
+### The fault is at a legitimate call target
+
+The `call` executed correctly — the pushed return address was read off the
+dumped stack in all five cores:
+
+```
+rip   = +0x11f7320   toml_edit::parser::prelude::new_input
+[rsp] = +0x115f1ae   parse_document   <- exactly frame #1, all 5 cores
+```
+
+Control arrived at `new_input` legitimately: no corrupted function pointer, no
+smashed return address, no bogus jump target. `rip` is the correct entry
+address and its page is in a valid R-X mapping, verified from the core's own
+PT_LOAD flags rather than from a rebuilt binary. **A present, executable page
+cannot raise a permission fault on an instruction fetch** — not in this
+program, not in any program.
+
+Not test-specific: three different tests crashed at the identical offset
+(`multi_root_stra` x2, `multi_root_per_` x2, `multi_root_isol`), across five
+ASLR bases.
+
+### Six further mechanisms, each refuted by measurement
+
+| mechanism | refuted by |
+|---|---|
+| NUMA-balancing PTE trapping | `numa_balancing=0`, single node |
+| THP file-backed collapse | THP is `[madvise]`, not `always` |
+| CET shadow stack / IBT | would raise `SEGV_CPERR` (10); this is `ACCERR` (2) |
+| binary rewritten under the running process | `ETXTBSY` — tested, not reasoned: the kernel refuses to open a running executable for writing |
+| load | 40/40 clean at load 26.85 |
+| hardware error | no MCE, no EDAC events in the journal, which does cover 04:07 |
+
+### What is NOT established, stated as such
+
+The positive cause. What exists is a fingerprint: one file, one offset, a
+70-second window (04:07:43-04:08:53) then nothing in the following nine hours,
+three different tests, and no other process on the machine faulting in that
+window. That is the shape of a transiently bad page-cache page or PTE for one
+text page of one executable, clearing when the page was later evicted and
+re-read. It CANNOT be confirmed here: `/sys/devices/system/edac/mc/` has no
+memory controller registered, so ECC errors are not reported on this box.
+
+Recorded as the shape of the evidence, not as a diagnosis. **Four causes have
+now been proposed for this crash and three were refuted by measurement; the
+fourth is deliberately left unasserted.**
+
+### Decision: do not "fix" the SIGSEGV
+
+A bigger stack, a recursion limit, or a retry would each address nothing. The
+exact binary is gone (core build-id `7a4a22be...`, the file at that path is now
+`d9ea0e55...`, rebuilt 5h22m later; all 11 `multi_root_tests` binaries across
+every build cache were scanned and none match), so `+0x11f7320` cannot be
+disassembled — but that does not matter, because the fault is architecturally
+impossible in software and there is nothing in our code to change.
+
+## The actionable residue, and the reason this ticket stays open
+
+**A crashed test binary silently lowers the suite total.** Measured: on a
+crashed binary `cargo test` exits **101** and emits **ZERO** `test result`
+lines. Cargo does not hide the crash — but any gate that sums
+`grep "^test result"` drops those tests while showing no failure at all.
+
+That is not hypothetical: it is what produced lane-b060-b062's reported
+2190/2218 against a true 2223.
+
+Fix: **check the exit code, and assert the expected binary count.** A total is
+only trustworthy alongside proof that every binary reported one. This is worth
+more than any conclusion about the crash, because it makes every future run
+honest regardless of what else goes wrong in it.
