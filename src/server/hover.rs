@@ -29,7 +29,7 @@ use crate::symbols::scope::{Symbol, SymbolKind};
 use crate::typecheck::access_position::access_position_at;
 use crate::typecheck::repr::TypeRepr;
 use crate::typecheck::GlobalScope;
-use crate::typedb::index::{FunctionInfo, MethodInfo, ParamInfo, TypeInfo};
+use crate::typedb::index::{FunctionInfo, MethodInfo, ParamDirection, ParamInfo, TypeInfo};
 use crate::typedb::TypeIndex;
 
 /// Members of an external type listed in full before the rest are summarised.
@@ -830,12 +830,15 @@ fn typedb_params(params: &[ParamInfo]) -> Vec<HoverParam> {
                 ty.insert_str(0, "const ");
             }
             if !ty.contains('&') {
-                if p.is_inout {
-                    ty.push_str(" &inout");
-                } else if p.is_out {
-                    ty.push_str(" &out");
-                } else if p.is_in {
-                    ty.push_str(" &in");
+                // B146: `None` (the Nadeo half, which states no direction)
+                // appends nothing, exactly as the hardcoded `false` triple
+                // did. Hover shows what the dump said and stays silent about
+                // what it did not.
+                match p.direction {
+                    Some(ParamDirection::Inout) => ty.push_str(" &inout"),
+                    Some(ParamDirection::Out) => ty.push_str(" &out"),
+                    Some(ParamDirection::In) => ty.push_str(" &in"),
+                    Some(ParamDirection::Value) | None => {}
                 }
             }
             HoverParam {

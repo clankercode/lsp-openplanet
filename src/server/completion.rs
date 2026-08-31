@@ -816,7 +816,10 @@ fn shortcut_detail(f: &crate::typedb::index::FunctionInfo) -> String {
         .params
         .iter()
         .map(|p| {
-            let ty = if p.is_out {
+            // B146: unknown direction renders bare, as the `false` did.
+            let ty = if p.direction == Some(crate::typedb::index::ParamDirection::Out) {
+                // (`&inout` renders bare here rather than as `&out`; see
+                // `ParamDirection::binds_by_reference`.)
                 format!("{}&out", p.type_name)
             } else {
                 p.type_name.clone()
