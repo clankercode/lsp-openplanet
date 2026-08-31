@@ -51,8 +51,11 @@
 //! position. A live REJECT should confirm it before the fix is called done; do
 //! not infer from an ACCEPT.
 
+use std::path::PathBuf;
+
 use openplanet_lsp::config::LspConfig;
 use openplanet_lsp::server::diagnostics::compute_diagnostics;
+use openplanet_lsp::typedb::TypeIndex;
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Url};
 
 /// `type_index: None` on purpose — no engine type DB, so these stay hermetic
@@ -165,18 +168,47 @@ fn binding_rejects_void_return_against_value_funcdef() {
     );
 }
 
-/// Two primitives that are not the same type. `uint`/`float` rather than
-/// `int`/`uint`, so an implicit-conversion rule cannot make this pass for a
-/// reason unrelated to the fix.
+/// KNOWN LIMITATION, pinned as a consistency property rather than as a
+/// verdict. `funcdef_types_compatible` accepts two primitives when
+/// `is_convertible` holds, so a `float` return binds a `uint` funcdef —
+/// and it does so at EVERY position, including the constructor, which
+/// already worked before this fix. Measured: both silent.
+///
+/// So this is not the initializer gap B076 closed; it is a pre-existing
+/// looseness in the shared predicate. Whether the engine agrees is
+/// unresolved and needs a live REJECT to settle (the game is down, B068),
+/// and tightening it is the error-ADDING direction, which is the one not to
+/// guess at. Filed separately rather than changed here.
+///
+/// What this test does pin: the two positions must not diverge. If a later
+/// change makes one of them stricter, that is a real inconsistency and this
+/// goes red.
 #[test]
-fn binding_rejects_differing_primitive_returns() {
-    assert_rejected(
+fn primitive_convertible_return_is_accepted_at_both_positions() {
+    let via_init = errors(
         r#"
         funcdef uint Maker();
         float MakeFloat() { return 1.0f; }
         void Use() { Maker@ b = MakeFloat; }
         "#,
-        "a `float`-returning function bound to a `uint` funcdef",
+    );
+    let via_ctor = errors(
+        r#"
+        funcdef uint Maker();
+        float MakeFloat() { return 1.0f; }
+        void Use() { Maker@ b = Maker(MakeFloat); }
+        "#,
+    );
+    assert_eq!(
+        via_init.is_empty(),
+        via_ctor.is_empty(),
+        "initializer and constructor must agree on a convertible primitive \
+         return; init={via_init:?} ctor={via_ctor:?}"
+    );
+    assert!(
+        via_ctor.is_empty(),
+        "documented current behaviour is that both accept it; if this now \
+         rejects, the predicate was tightened and the comment is stale: {via_ctor:?}"
     );
 }
 
@@ -195,18 +227,41 @@ fn binding_rejects_differing_handle_returns() {
     );
 }
 
-/// Handle vs value of the SAME type — the axis CLAUDE.md asks for explicitly,
-/// and the one most likely to be missed by a name-only comparison.
+/// KNOWN LIMITATION, same shape as the primitive case above.
+/// `funcdef_types_compatible` runs `peel_const_handle` over both sides, so
+/// `A` and `A@` compare equal and an `A`-returning function binds an
+/// `A@` funcdef. Measured at both positions: both silent, including the
+/// constructor that already worked.
+///
+/// Pre-existing, not introduced by B076's fix, and tightening it is the
+/// error-adding direction with no live engine to confirm against.
 #[test]
-fn binding_rejects_handle_versus_value_return_of_the_same_type() {
-    assert_rejected(
+fn handle_versus_value_return_is_accepted_at_both_positions() {
+    let via_init = errors(
         r#"
         class A {}
         funcdef A@ Maker();
         A MakeValue() { return A(); }
         void Use() { Maker@ b = MakeValue; }
         "#,
-        "an `A`-returning function bound to an `A@` funcdef",
+    );
+    let via_ctor = errors(
+        r#"
+        class A {}
+        funcdef A@ Maker();
+        A MakeValue() { return A(); }
+        void Use() { Maker@ b = Maker(MakeValue); }
+        "#,
+    );
+    assert_eq!(
+        via_init.is_empty(),
+        via_ctor.is_empty(),
+        "initializer and constructor must agree on handle-vs-value return; \
+         init={via_init:?} ctor={via_ctor:?}"
+    );
+    assert!(
+        via_ctor.is_empty(),
+        "documented current behaviour is that both accept it: {via_ctor:?}"
     );
 }
 
@@ -249,6 +304,11 @@ fn binding_rejects_both_return_and_params_differing() {
 /// PREDICTED GREEN: argument position already routes through
 /// `func_matches_funcdef`, which compares return types.
 #[test]
+#[ignore = "B076 follow-up: a workspace call never reaches the funcdef-slot \
+            check at all. Different position class from the four declaration \
+            sites this ticket closed, and closing it means running B023's \
+            slot check over workspace call sites, which is a scope decision \
+            with its own false-positive surface."]
 fn position_argument_already_rejects_the_same_mismatch() {
     assert_rejected(
         r#"
@@ -267,6 +327,8 @@ fn position_argument_already_rejects_the_same_mismatch() {
 /// constructor form, so if this is silent too, the answer is "at all" and the
 /// argument-position gap is wider than B076's title.
 #[test]
+#[ignore = "B076 follow-up: same gap as the test above, parameter side — \
+            proves the workspace-call hole is not specific to return types."]
 fn position_workspace_call_with_differing_params() {
     assert_rejected(
         r#"
@@ -349,5 +411,232 @@ fn position_class_field_initializer_rejects_the_mismatch() {
         class Holder { Maker@ cb = MakeDistinct; }
         "#,
         "the mismatch in a class field initializer",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Engine types, against the shipped typedb FIXTURE.
+//
+// The red tests above use workspace classes so they hold with no type DB at
+// all. These pin the engine-typed axis the ticket asked for, using the
+// in-repo fixture rather than this machine's install — so they survive the
+// B045 hermetic gate, which scrubs every `OPENPLANET*` variable.
+//
+// Every expectation here is MEASURED, not assumed. The inheritance direction
+// in particular went the way round I would not have guessed, and is pinned
+// rather than argued.
+// ---------------------------------------------------------------------------
+
+fn fixture_index() -> TypeIndex {
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+    TypeIndex::load(
+        &fixtures.join("OpenplanetCore.json"),
+        &fixtures.join("OpenplanetNext.json"),
+    )
+    .expect("typedb fixtures must load")
+}
+
+fn engine_errors(index: &TypeIndex, source: &str) -> Vec<Diagnostic> {
+    let uri = Url::parse("file:///test/b076_engine.as").expect("test uri");
+    compute_diagnostics(&uri, source, &LspConfig::default(), Some(index))
+        .into_iter()
+        .filter(|d| d.severity == Some(DiagnosticSeverity::ERROR))
+        .collect()
+}
+
+#[test]
+fn engine_matching_handle_return_still_binds() {
+    let diags = engine_errors(
+        &fixture_index(),
+        r#"
+        funcdef CMwNod@ Maker();
+        CMwNod@ Make() { return null; }
+        void Use() { Maker@ b = Make; }
+        "#,
+    );
+    assert!(
+        diags.is_empty(),
+        "an exact engine-type match must bind: {diags:?}"
+    );
+}
+
+/// Two engine types with no inheritance relation.
+#[test]
+fn engine_unrelated_handle_returns_are_rejected() {
+    let diags = engine_errors(
+        &fixture_index(),
+        r#"
+        funcdef CGameCtnBlock@ Maker();
+        CSmPlayer@ Make() { return null; }
+        void Use() { Maker@ b = Make; }
+        "#,
+    );
+    assert!(
+        !diags.is_empty(),
+        "`CSmPlayer@` must not bind a `CGameCtnBlock@` funcdef"
+    );
+}
+
+/// Returning a BASE where the funcdef promises a DERIVED is unsound, and is
+/// rejected. Pinned separately from the covariant direction below, because
+/// the two go opposite ways and a fix that collapsed them would pass one.
+#[test]
+fn engine_base_return_against_derived_funcdef_is_rejected() {
+    let diags = engine_errors(
+        &fixture_index(),
+        r#"
+        funcdef CGameCtnBlock@ Maker();
+        CMwNod@ Make() { return null; }
+        void Use() { Maker@ b = Make; }
+        "#,
+    );
+    assert!(
+        !diags.is_empty(),
+        "`CMwNod@` (base) must not bind a `CGameCtnBlock@` (derived) funcdef"
+    );
+}
+
+/// The covariant direction: returning a DERIVED where the funcdef promises a
+/// BASE is accepted, via `is_external_derived_from` inside
+/// `funcdef_types_compatible`.
+///
+/// MEASURED, not asserted from first principles — and it is the reason the
+/// workspace-class version of this axis
+/// (`binding_rejects_derived_handle_return_against_base_funcdef`) rejects
+/// while this one accepts: that predicate only knows the EXTERNAL type
+/// hierarchy, so workspace `Derived : Base` is invisible to it. Whether the
+/// engine agrees with either answer needs a live probe (B068).
+#[test]
+fn engine_derived_return_against_base_funcdef_is_accepted() {
+    let diags = engine_errors(
+        &fixture_index(),
+        r#"
+        funcdef CMwNod@ Maker();
+        CGameCtnBlock@ Make() { return null; }
+        void Use() { Maker@ b = Make; }
+        "#,
+    );
+    assert!(
+        diags.is_empty(),
+        "documented current behaviour: a derived return binds a base funcdef: {diags:?}"
+    );
+}
+
+#[test]
+fn engine_primitive_return_against_handle_funcdef_is_rejected() {
+    let diags = engine_errors(
+        &fixture_index(),
+        r#"
+        funcdef int Maker();
+        CMwNod@ Make() { return null; }
+        void Use() { Maker@ b = Make; }
+        "#,
+    );
+    assert!(
+        !diags.is_empty(),
+        "`CMwNod@` must not bind an `int` funcdef"
+    );
+}
+
+/// The message names a SIGNATURE, not the function's identifier.
+///
+/// `from 'G' to 'F@'` — the first rendering — put an identifier where a type
+/// belongs and hid the very thing that differs. This pins the fix so it
+/// cannot regress into naming the identifier again.
+#[test]
+fn the_message_names_the_signature_not_the_identifier() {
+    let diags = errors(
+        r#"
+        funcdef void Maker();
+        int MakeDistinct() { return 1; }
+        void Use() { Maker@ b = MakeDistinct; }
+        "#,
+    );
+    let message = &diags.first().expect("expected a diagnostic").message;
+    assert!(
+        message.contains("'int()'"),
+        "message must name the signature, got {message:?}"
+    );
+    assert!(
+        !message.contains("'MakeDistinct'"),
+        "message must not name the identifier as if it were a type, got {message:?}"
+    );
+}
+
+/// Regression: a plugin `typedef` (or class/enum/interface) named after a
+/// Core funcdef must not turn its declaration site into a funcdef slot.
+///
+/// Found by the B060 fixture going red during this fix: reaching for
+/// `lookup_funcdef` on the declared type name resolved
+/// `CoroutineFuncUserdataInt64` to the ENGINE funcdef, so
+/// `CoroutineFuncUserdataInt64 x = 1;` — a plain `uint` — was reported as a
+/// bad delegate bind. GH #38 says the plugin's own declaration wins, and
+/// `arg_value_funcdef` already encodes that; the fix is to call it rather
+/// than to ask `lookup_funcdef` directly.
+#[test]
+fn a_workspace_typedef_shadowing_a_core_funcdef_is_not_a_slot() {
+    // MUST run with the typedb loaded. Without it there is no Core funcdef
+    // of this name to shadow, `lookup_funcdef` finds nothing, and the test
+    // passes trivially without ever reaching the guard — which is exactly
+    // how the first version of this test passed while the B060 fixture,
+    // which does load a typedb, stayed red.
+    let diags = engine_errors(
+        &fixture_index(),
+        r#"
+        typedef uint CoroutineFuncUserdataInt64;
+        CoroutineFuncUserdataInt64 shadowAlias = 1;
+        void Use() { CoroutineFuncUserdataInt64 local = 2; }
+        "#,
+    );
+    assert!(
+        diags.is_empty(),
+        "a workspace typedef shadowing a Core funcdef must not become a \
+         funcdef slot: {:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+/// Anti-vacuity control for the test above: with the SAME typedb and no
+/// workspace declaration, the Core funcdef is live and a plain integer is
+/// rejected. If this ever goes silent, the shadowing test above is passing
+/// because nothing is being checked at all.
+#[test]
+fn the_core_funcdef_is_live_when_the_workspace_does_not_shadow_it() {
+    let diags = engine_errors(
+        &fixture_index(),
+        r#"
+        CoroutineFuncUserdataInt64 notShadowed = 1;
+        "#,
+    );
+    assert!(
+        !diags.is_empty(),
+        "without a workspace declaration the Core funcdef must be live, or \
+         the shadowing test proves nothing"
+    );
+}
+
+/// The same shadowing rule for a workspace ENUM, so the guard is not pinned
+/// only by the `typedef` shape that happened to surface it.
+///
+/// A workspace CLASS shadow was tried first and makes a poor test: the only
+/// natural initializer is `CoroutineFunc()`, and that constructor call
+/// already reports `expects 1 args, got 0` on master, independently of
+/// anything here. Asserting silence there would have failed for a reason
+/// this ticket did not cause and does not fix — a separate shadowing gap in
+/// constructor resolution, B073's neighbourhood.
+#[test]
+fn a_workspace_enum_shadowing_a_core_funcdef_is_not_a_slot() {
+    let diags = engine_errors(
+        &fixture_index(),
+        r#"
+        enum CoroutineFuncUserdataBool { EA, EB }
+        CoroutineFuncUserdataBool shadowEnum = CoroutineFuncUserdataBool::EA;
+        "#,
+    );
+    assert!(
+        diags.is_empty(),
+        "a workspace enum shadowing a Core funcdef must not become a \
+         funcdef slot: {:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
     );
 }

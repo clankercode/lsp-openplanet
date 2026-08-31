@@ -1490,7 +1490,8 @@ impl<'a> Checker<'a> {
                 self.record_type_repr_uses(&ty);
                 for d in &var.declarators {
                     if let Some(init) = &d.init {
-                        let _ = self.expr_type(init);
+                        let init_ty = self.expr_type(init);
+                        self.check_funcdef_binding(&ty, init, &init_ty);
                     }
                 }
             }
@@ -1783,7 +1784,8 @@ impl<'a> Checker<'a> {
         self.record_type_repr_uses(&ty);
         for d in &var.declarators {
             if let Some(init) = &d.init {
-                let _ = self.expr_type(init);
+                let init_ty = self.expr_type(init);
+                self.check_funcdef_binding(&ty, init, &init_ty);
             }
         }
     }
@@ -1809,6 +1811,7 @@ impl<'a> Checker<'a> {
                 if let Some(init) = &d.init {
                     let init_ty = self.expr_type(init);
                     self.check_init_conversion(&declared_ty, init, &init_ty);
+                    self.check_funcdef_binding(&declared_ty, init, &init_ty);
                 }
                 declared_ty.clone()
             };
@@ -2597,6 +2600,77 @@ impl<'a> Checker<'a> {
             _ => return None,
         };
         self.scope.lookup_funcdef(&name)
+    }
+
+    /// B076: the funcdef bind check, reached from a DECLARATION or an
+    /// ASSIGNMENT rather than only from a constructor argument.
+    ///
+    /// Nothing here re-implements the comparison, because nothing was wrong
+    /// with it. [`Self::func_matches_funcdef`] already compares the return
+    /// type FIRST and then every parameter, and
+    /// [`Self::arg_fails_funcdef_slot`] already carries B023's
+    /// false-positive guards — a workspace type the typedb cannot see stays
+    /// neutral, and `null` binds any funcdef handle. Both were only ever
+    /// reached from an argument position.
+    ///
+    /// That is the whole defect: `Maker@ b = fn` accepted a mismatched
+    /// return type AND a mismatched parameter list, while `Maker(fn)`
+    /// rejected both, because only the second reached this predicate. The
+    /// ticket described it as a missing return-type comparison; measured
+    /// per position, the comparison exists and the call did not.
+    fn check_funcdef_binding(&mut self, declared: &TypeRepr, init: &Expr, init_ty: &TypeRepr) {
+        // GH #38 shadowing, and it has to be checked HERE rather than left to
+        // `arg_value_funcdef`. That helper guards only its `Named` arm; a
+        // declared type that resolves to `Funcdef(_)` goes straight to
+        // `lookup_funcdef` and picks up the ENGINE funcdef. A declared type is
+        // written in the plugin's own source, so the plugin's declaration wins
+        // whichever way the name resolved.
+        //
+        // Measured, not anticipated: without this,
+        // `typedef uint CoroutineFuncUserdataInt64;
+        //  CoroutineFuncUserdataInt64 shadowAlias = 1;`
+        // is reported as a bad delegate bind — a false positive that turned the
+        // B060 fixture red. Pinned by the two shadowing tests in
+        // `tests/b076_funcdef_return_type.rs`, which must run WITH a typedb or
+        // they pass without reaching this line.
+        if let TypeRepr::Named(n) | TypeRepr::Funcdef(n) = Self::peel_const_handle(declared) {
+            if self
+                .scope
+                .workspace_shadows_funcdef(&self.resolve_value_type_name(n))
+            {
+                return;
+            }
+        }
+        let Some(fd) = self.arg_value_funcdef(declared) else {
+            return;
+        };
+        if self.arg_fails_funcdef_slot(&fd, init, init_ty) {
+            let from = self.funcdef_binding_source_display(init, init_ty);
+            self.diagnostics.push(TypeDiagnostic {
+                span: init.span,
+                kind: TypeDiagnosticKind::NoImplicitConversion {
+                    from,
+                    to: declared.display(),
+                },
+            });
+        }
+    }
+
+    /// Render the bound thing as a SIGNATURE when it resolves to exactly one
+    /// function.
+    ///
+    /// Without this the message reads `Can't implicitly convert from 'G' to
+    /// 'F@'`, naming an identifier where a type belongs and hiding the very
+    /// thing that differs. `from 'int()' to 'F@'` shows the mismatch and
+    /// matches how the engine words it. Falls back to the type display when
+    /// the reference is overloaded or does not resolve, since then there is
+    /// no single signature to name.
+    fn funcdef_binding_source_display(&self, init: &Expr, init_ty: &TypeRepr) -> String {
+        let sigs = self.lookup_arg_function_sigs(init, init_ty);
+        match sigs.as_slice() {
+            [sig] => format!("{}({})", sig.return_type, sig.param_types.join(", ")),
+            _ => init_ty.display(),
+        }
     }
 
     /// B023: concrete evidence that `arg` cannot bind the funcdef-typed
@@ -4489,6 +4563,7 @@ impl<'a> Checker<'a> {
                         },
                     });
                 }
+                self.check_funcdef_binding(&lhs_ty, rhs, &rhs_ty);
                 TypeRepr::Error(String::new())
             }
             ExprKind::Ternary {
