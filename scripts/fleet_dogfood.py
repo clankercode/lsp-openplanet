@@ -412,6 +412,41 @@ def log_size() -> int:
         return 0
 
 def read_log_window(mark: int, plugin_folder: str) -> str:
+    """TEST-ONLY (B128). Nothing in production calls this — use
+    `read_log_window_raw`.
+
+    THIS IS THE FUNCTION WHOSE SEVERITY FILTER CAUSED B118's THREE FALSE-GREEN
+    CHANNELS, and it survives only because two mutation harnesses need the name
+    to exist. Its plausible spelling is the hazard: reach for the
+    obvious-sounding reader and the channels come back.
+
+    What the filter costs, concretely: it drops every `[ TRAC]` line, and BOTH
+    build markers -- `Starting build for "<id>"` and `Loaded plugin '<id>'` --
+    are TRAC. So `build_slice` returns ZERO lines from a filtered window, and
+    no build-health check can be written on top of one. A consumer reading this
+    can see whether anything COMPLAINED, never whether the build HAPPENED,
+    which made "never ran" and "ran clean" the same observation on questions
+    whose subject was acceptance.
+
+    Attribution was never the problem: `parse_game_diagnostics` reads only
+    lines with a source location, the filter keeps every line containing "ERR",
+    so both readers yield the same ERR set. That equivalence is why B123's
+    migration could not change a corpus row -- and it is also why this function
+    looks harmless. It is harmless for attribution and disqualifying for
+    everything else.
+
+    WHY IT IS NOT DELETED. `check_probe_cleanup_nonvacuous.py` and
+    `check_enum_probe_nonvacuous.py` each carry a mutation that reverts a call
+    site TO this reader, to prove the raw default is load-bearing. Delete the
+    function and those mutations still get scored as CAUGHT -- by an
+    AttributeError at import, not by the guard they exist to exercise. The
+    harnesses would keep reporting a full score while one mutation had silently
+    stopped testing reader semantics. That is a worse outcome than a dead
+    function: a loud break would be fine, a quiet downgrade is not.
+
+    `test_only_reader_has_no_production_callers` in `run_selftest` holds the
+    "no production callers" half, so this docstring cannot drift into a lie.
+    """
     try:
         with open(OP_LOG, "rb") as f:
             f.seek(mark)
@@ -960,6 +995,34 @@ def run_selftest() -> int:
     check("and a verified one carries no marker",
           v(0, {"diagnostics": [], "build_status": "CLEAN"}).endswith("build=?"),
           False)
+
+    # --- B128: this reader must stay test-only ---------------------------
+    # A docstring saying "nothing calls this" is a claim that rots the first
+    # time somebody reaches for the obvious-sounding name. The grep IS the
+    # verification, so it runs here rather than living in the ticket.
+    #
+    # Mutation harnesses are excluded BY FILENAME: they carry the call inside a
+    # string literal on purpose, to prove the raw default is load-bearing.
+    # Assembled at runtime so this line does not match ITSELF. The obvious
+    # alternative -- skipping fleet_dogfood.py -- would blind the check to the
+    # exact file that held B127's worst caller (`probe_one`), so the scan has
+    # to cover its own module.
+    needle = "fleet.read_log_window" + "("
+    scripts_dir = Path(__file__).resolve().parent
+    offenders = []
+    for path in sorted(scripts_dir.glob("*.py")):
+        if path.name.startswith("check_") and path.name.endswith(
+                "_nonvacuous.py"):
+            continue
+        for n, line in enumerate(path.read_text().splitlines(), 1):
+            # A CALL, not a stub assignment (`fleet.read_log_window = ...`),
+            # which is how the offline selftests revoke the door.
+            if needle in line:
+                offenders.append(f"{path.name}:{n}: {line.strip()}")
+    check("the severity-filtered reader has no production callers (B128) — "
+          "it drops [ TRAC], so both build markers are invisible and a build "
+          "that never ran reads as one that ran clean",
+          offenders, [])
 
     for f in failures:
         print(f"  - {f}")
