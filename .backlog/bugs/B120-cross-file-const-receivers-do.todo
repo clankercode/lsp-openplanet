@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T13:39:48Z"
 depends_on: []
 estimate_hours: 1
 id: B120
 priority: high
+started_at: null
 status: pending
 tags: []
 title: Cross-file const receivers do not get apply_receiver_const on the method return type, so downstream ConstViolation still misses cross-file
@@ -12,3 +14,42 @@ updated_at: "2026-08-31T13:39:48Z"
 ---
 
 Cross-file const receivers do not get apply_receiver_const on the method return type, so downstream ConstViolation still misses cross-file
+
+
+## Found by lane-enum while fixing B116, 2026-08-31. Explicitly out of B116's scope.
+
+B116's same-file arm calls `apply_receiver_const` on the method return type.
+The new cross-file arm deliberately does **not**.
+
+Consequence: downstream `ConstViolation` diagnostics still miss the cross-file
+case even though the const-receiver *call* check now works there. The two halves
+of the same rule disagree about how far the const propagates.
+
+## Why it was left out
+
+The lane measured the call-check surface (827 unique sites, 807 excluded by
+provenance, 17 genuine cross-file workspace classes, zero would-fire). It did
+**not** measure the return-type propagation surface, and shipping an unmeasured
+false-positive surface is the thing this batch keeps refusing to do.
+
+So this is not a known-safe one-liner. **Measure first**, the same way B116 did:
+instrument the widened propagation to keep the current answer while recording
+every disagreement across the fleet, read the disagreements, then write the fix.
+
+## What to watch for
+
+The 807 engine/builtin receivers B116 excluded by provenance are the same
+population here, and `lookup_method_return`'s "External types: no const-qualifier
+metadata yet" comment applies to return types just as much as to receivers.
+Whatever gate this uses must be structural — reading only the workspace half of
+the merged view, as `workspace_own_method_is_const` does — rather than a filter
+someone can forget to apply.
+
+## Test axes
+
+Pair every case same-file against cross-file and assert the two are EQUAL, which
+is the shape B116 used and the reason its gaps are now visible rather than
+silent. Cover a const method returning a handle, a value, a reference, and an
+array; and both a const and a non-const overload of the same name, since the
+overload set is where "any const overload makes the call legal" and "the return
+type of the one that matched" can diverge.
