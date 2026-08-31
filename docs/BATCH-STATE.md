@@ -1,17 +1,52 @@
-# bl-fix-many batch state — 2026-08-31, updated 21:05 AEST
+# bl-fix-many batch state — 2026-08-31, updated 21:50 AEST
 
-> **RESUMED 21:05.** Credits were restored, four fresh lanes are running
-> (enum: B091 then B100; unused: B093 then B099; tooling: B106 then B097 then
-> B096; resolver: B101). Master re-verified at **2601 on x-tuf** — an
-> independent host, because of the ENOSPC hazard below. The history below is
-> kept as the record of the outage.
->
-> **GATES NOW RUN ON x-tuf, NOT x-alpha.** x-alpha reached 100% disk today and
-> `just rtest` exited 0 while the underlying build had FAILED with ENOSPC — a
-> false green (B106, lane-tooling's first ticket). x-alpha is back to 18G free
-> after reclaiming ~10G of finished lane trees, but do not trust its exit codes
-> until B106 lands. Trust the printed SUITE-VERIFIED line WITH its binary
-> count, and reconcile the total arithmetically against the base.
+## Now
+
+Master **42c6544**, **SUITE-VERIFIED 2653 passed; 0 failed; 12 ignored; 30/30
+binaries**, gated on **x-tuf** (see the ENOSPC note below — do not gate on
+x-alpha until B106 lands).
+
+Closed since the 21:05 restart: **B091, B093, B099, B101**. Suite 2601 -> 2653.
+
+Lanes running: enum (B100), tooling (B106 -> B097 -> B096), unused (B107
+rebasing, then B108). Two tickets were FILED from lane findings tonight —
+B107 and B108 — both found while doing something else and deliberately not
+folded in.
+
+## Gate discipline, hard-won today
+
+Three distinct false-green mechanisms hit this gate in one day. None produced a
+bad merge, and the reason is worth keeping: the gate's PASS signal is expensive
+to forge — one `SUITE-VERIFIED` line, printed at one place, only on a fully
+clean run, carrying totals that must reconcile against the previous run.
+
+1. `-- --test <name>` goes to LIBTEST as a name substring, matches nothing, and
+   still runs and reports every binary: `SUITE-VERIFIED: 0 passed` over 30/30
+   coverage. Fixed in 586d18b.
+2. ENOSPC on x-alpha — exit 0 over a failed build. **B106, unfixed.**
+3. Piping the gate to `tail` destroys the exit code entirely.
+
+**So: gate unpiped, redirect to a file, capture `$status`, and RECONCILE the
+total.** `SUITE-VERIFIED` on its own is a word; 2653 + N is the check.
+
+## Never `git pull` here
+
+`origin` is **782 commits behind** — sessions share one local checkout rather
+than syncing through GitHub. `git pull --rebase` starts replaying the entire
+history onto a months-old base. To pick up another session's work it is already
+in your checkout; in a worktree use `git rebase master`. Full account in
+docs/verification-hazards.md.
+
+## The method finding worth carrying past this batch
+
+When a test's subject is an ABSENCE, red/green cannot validate it — the pre-fix
+state is absence everywhere, so every "offers nothing" assertion passes for
+free, and such a test is indistinguishable by inspection from one that holds.
+This unifies B088's vacuous silence, B097's non-discriminating control and
+B071's test written in a harness that ran no analysis.
+
+Operational rule: **after a red run, mutation-test every test that PASSED.**
+The red run hands you that list for free.
 
 ## Original entry — 20:35 AEST
 
