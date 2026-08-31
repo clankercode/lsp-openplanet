@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T14:12:59Z"
 depends_on: []
 estimate_hours: 1
 id: B128
 priority: high
+started_at: null
 status: pending
 tags: []
 title: fleet.read_log_window has no production callers left after B123 and should be removed or documented as test-only
@@ -12,3 +14,34 @@ updated_at: "2026-08-31T14:12:59Z"
 ---
 
 fleet.read_log_window has no production callers left after B123 and should be removed or documented as test-only
+
+
+## Housekeeping, from lane-resolver's B123 work, 2026-09-01
+
+After B123 migrated `probe_enum_corpus` to the raw reader,
+`fleet.read_log_window` — the severity-filtered one — **has no production
+callers at all.**
+
+lane-resolver deliberately left it in place rather than delete it in the B123
+commit, because removing it is a separate mechanical change and it did not want
+that riding along in a diff whose argument is about oracle semantics. That was
+the right call and this ticket is the consequence.
+
+## Decide, do not drift
+
+Either delete it, or keep it and **document it as test-only in its own
+docstring**. What is not acceptable is leaving it looking like a live API: it is
+the function whose severity filter caused B118's three false-green channels, and
+the next person to reach for the obvious-sounding name will reintroduce them.
+
+If keeping it, say in the docstring WHY the raw reader is the default and what
+the filter costs — both build markers are `[ TRAC]`, so `build_slice` returns
+zero lines from a filtered window, which is why the build-health check cannot
+exist on top of it.
+
+## Check before deleting
+
+Confirm no selftest, mutation harness or doc example depends on it —
+`check_probe_cleanup_nonvacuous.py` and `check_enum_probe_nonvacuous.py` both
+exercise reader behaviour, and a grep across `scripts/` and `docs/` is the whole
+verification. Small ticket; the only way to get it wrong is not to look.
