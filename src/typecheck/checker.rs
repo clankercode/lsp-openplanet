@@ -3886,8 +3886,16 @@ impl<'a> Checker<'a> {
             // there is no seam for the engine to insert a numeric conversion
             // into and a `double()` cannot stand in for an `int()`.
             //
-            // REASONED, not probed — B097 blocks probing repo-wide — and the
-            // reasoning is corroborated rather than assumed. B027 measured
+            // REASONED, not probed — and NOTE THE DATE ON THAT EXCUSE. It
+            // read "B097 blocks probing repo-wide"; B097 is fixed, the game
+            // is reachable, and B144 has since measured the sibling `const`
+            // axis through exactly this predicate. So this arm is now
+            // CHEAPLY MEASURABLE AND STILL UNMEASURED, which is a different
+            // and more actionable state than the one this comment used to
+            // describe. See `b110_a_bare_int_handler_no_longer_binds_the_int64_userdata_slot`
+            // for the one pair that would settle it.
+            //
+            // The reasoning is corroborated rather than assumed. B027 measured
             // the sibling axis: any plain/`&in`/`&out`/`&inout` MODE mismatch
             // is `Can't create delegate` (OP 1.29.5, 2026-08-29), so
             // exactness is already the rule for how a parameter is passed;
@@ -12132,8 +12140,24 @@ void Main() {
     /// measured the sibling MODE axis as exact (`Can't create delegate`, OP
     /// 1.29.5); and 151 plugins write `int64`/`uint64`/`double` handlers and
     /// never `int`, which is what you would expect if only the exact type
-    /// binds. B097 blocks the probe that would settle it. Re-measure when it
-    /// is fixed — this test is the row to revisit.
+    /// binds.
+    ///
+    /// B152: **B097 IS FIXED AND THIS IS STILL UNMEASURED.** The note used to
+    /// read "B097 blocks the probe that would settle it. Re-measure when it is
+    /// fixed" — and it was left standing after B097 was fixed, which is how a
+    /// blocked-probe excuse outlives the block. B144 measured the neighbouring
+    /// `const` axis through this same predicate in one probe run, so the cost
+    /// of settling this is a handful of variants
+    /// (`scripts/probe_const_handle_funcdef.py` is the working model:
+    /// `void H(int v)` at `startnew(H, 1)`, against the
+    /// `CoroutineFuncUserdataInt64` slot, with a matching `int64` handler as
+    /// the ACCEPT control).
+    ///
+    /// Deliberately NOT taken here: it is a different axis from B152's, and a
+    /// contradiction would be a behaviour change arriving after this lane was
+    /// gated. Ticketed instead. What changed is only the honesty of the note —
+    /// "no oracle exists" became "an oracle exists and nobody has used it",
+    /// which is the state a future lane can act on.
     #[test]
     fn b110_a_bare_int_handler_no_longer_binds_the_int64_userdata_slot() {
         let diags = check_with_typedb("void H(int v) { }\nvoid Render() { startnew(H, 1); }");

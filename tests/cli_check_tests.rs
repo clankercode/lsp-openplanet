@@ -5333,14 +5333,28 @@ fn check_command_issue_repro_b062_manifest_exports_root_unused() {
 // shipped dump — typeid 67108888 is referenced by `Sort`'s arg list and never
 // declared, and so is the template parameter `T` (67112305); re-measured here
 // against 1.29.5 and 1.29.14 and the live install, all three the same. Only
-// `bool less_nonconst(T&in a, T&in b)` exists. So the const form's signature
-// is SYNTHESISED, and whether the engine accepts a non-const callback at the
-// const slot is UNMEASURED: B097 makes game probing impossible repo-wide, so
-// there is no verdict to have. The rule is therefore scoped to what is wrong
-// under EVERY reading of that signature — arity, return type, element type
-// and parameter mode — and stays neutral on const-ness by construction, since
-// `funcdef_types_compatible` peels `const`. The neutrality is pinned as a
-// required silence in the correct-callbacks fixture.
+// `bool less_nonconst(T&in a, T&in b)` exists, so the const form's signature
+// is SYNTHESISED.
+//
+// B102 wrote, and this comment carried until B152: "whether the engine
+// accepts a non-const callback at the const slot is UNMEASURED: B097 makes
+// game probing impossible repo-wide, so there is no verdict to have." BOTH
+// HALVES ARE NOW FALSE. B097 is fixed, and B144 took the verdict — by making
+// the compiler print its own slot signature, which it does whenever a bind
+// fails (2026-09-01, OP 1.29.14,
+// `docs/probes/b144-const-handle-funcdef.tsv`):
+//
+//     Where 'less' is 'bool int[]::less(const int&in, const int&in)'
+//     Where 'less_nonconst' is 'bool int[]::less_nonconst(int&in, int&in)'
+//     Where 'less' is 'bool Item@[]::less(const Item@const&in, const Item@const&in)'
+//
+// The two slots are exact mirror images and the engine enforces each in both
+// directions, with a handle element type carrying BOTH consts. B152 made the
+// comparison const-exact to match, so the rule is no longer scoped to "what
+// is wrong under every reading" — the reading is known. The neutrality that
+// used to be pinned as a required silence in the correct-callbacks fixture is
+// gone with it; those rows are mismatches and live in the mismatched fixture,
+// where the engine rejects them at the same lines the checker does.
 //
 // Parameter MODE is not a guess: B027 measured `Can't create delegate` on any
 // plain/&in/&out/&inout mismatch (OP 1.29.5, 2026-08-29), and this reuses that
