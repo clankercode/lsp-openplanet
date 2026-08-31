@@ -331,11 +331,24 @@ pub fn unused_declarations_for_file(
 /// Matched by SIMPLE name, because the two sides are not in the same
 /// namespace: a consumer reaches `TournamentStation::SendEvent` through the
 /// export namespace while the body is a plain global `SendEvent`. Arity
-/// ranges must overlap. Parameter TYPES are deliberately not compared — the
-/// fixture above pairs an `import ... (string a, string b)` stub with a
-/// `(const string &in a, const string &in b)` body and calls that the
-/// correct pattern, so a stricter rule would invent a precision the engine
-/// does not have and would resurrect the false warning it exists to remove.
+/// ranges must overlap.
+///
+/// Parameter TYPES are deliberately not compared, and this UNDER-APPROXIMATES
+/// the engine on purpose. Game-probed 2026-08-31 (OP 1.29.5; two plugins,
+/// exporter + consumer, with a positive AND a negative control): the engine
+/// binds an import by EXACT parameter type. A stub `import string Echo(string a)`
+/// over a body `string Echo(const string &in a)` does NOT bind — the consumer
+/// dies at runtime with `Unbound function called` — while an exactly-matching
+/// stub binds and runs.
+///
+/// Mirroring that strictness here is still the wrong trade. Comparing
+/// AngelScript type TEXT (`const`, `&in`/`&out`, handles, defaults, typedefs)
+/// is precisely where a normalisation slip becomes a false "never used" on a
+/// live export — the entire defect this rooting removes. Over-rooting instead
+/// yields a missed warning, and `TrulyDead` in the fixture is the control that
+/// stops "safe" becoming "root everything". The cost, stated plainly: a stub
+/// whose types do not match its body is a BROKEN export, genuinely unreachable
+/// from consumers, and this rule will not flag it.
 fn exported_signature_roots(snapshot: &AnalysisSnapshot) -> HashSet<(String, usize, usize)> {
     let strict = snapshot.strict_export_paths();
     if strict.is_empty() {
