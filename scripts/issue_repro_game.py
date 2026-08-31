@@ -1287,6 +1287,85 @@ def run_selftest() -> int:
           tsv_row(rec_of("CLEAN"), {"count": None}, "1.29.14",
                   "2026-09-01")["lsp_today"], "UNMEASURED")
 
+    # --- B145 follow-up: a prose reason must EXPIRE when its subject moves --
+    # B157 and B168 found the same defect in two separate audits: a JUSTIFIED
+    # row whose free-text reason WAS the false claim, so the audit accepted the
+    # defect BECAUSE of the justification. This artifact reproduced it within
+    # one regeneration: b102-array-sort-correct-callbacks carried the note "the
+    # engine rejects all three 'correct' comparators and the LSP is silent on
+    # all three", and after B152 moved those comparators to the sibling fixture
+    # the row measured engine ACCEPT and LSP DIAGNOSES(3) -- both halves
+    # inverted -- with the note carried across unchanged and nothing firing.
+    def stamped(**kw):
+        base = {"fixture": "fx", "build_status": "REJECTED", "verdict": "REJECT",
+                "engine_compiled": "4", "lsp_today": "CLEAN",
+                "divergence": "the LSP misses this",
+                "divergence_for": "REJECT|CLEAN"}
+        base.update(kw)
+        return base
+
+    check("B145: a note stamped for the CURRENT measurement settles the row",
+          agreement_problems([stamped()]), [])
+    flipped = agreement_problems([stamped(verdict="ACCEPT",
+                                          build_status="CLEAN",
+                                          lsp_today="DIAGNOSES(3)")])
+    if not flipped:
+        check("B145: a note survives a POLARITY FLIP — the exact b102 shape, "
+              "where both halves inverted and the prose still read as a reason",
+              flipped, ["<a problem>"])
+    elif "stamped for" not in flipped[0]:
+        check("B145: the expiry report names the stamp and the new state",
+              flipped, ["stamped for"])
+    # It must expire on EITHER half moving, not only on a full flip.
+    for label, kw in (("the LSP's answer alone", {"lsp_today": "DIAGNOSES(9)"}),
+                      ("the engine's verdict alone",
+                       {"verdict": "ACCEPT", "build_status": "CLEAN"})):
+        if not agreement_problems([stamped(**kw)]):
+            check(f"B145: a note expires when {label} moves", [], ["<a problem>"])
+    # An unstamped note -- hand-typed straight into the file, dodging the
+    # generator's expiry -- must not settle anything either.
+    if not agreement_problems([stamped(divergence_for="-")]):
+        check("B145: an UNSTAMPED note does not settle a row; typing prose "
+              "directly into the file must not bypass the expiry",
+              [], ["<a problem>"])
+    # PAIR: a row with NO note is judged on its own merits, not condemned for
+    # a missing stamp.
+    check("B145: a row with no note is not asked for a stamp",
+          agreement_problems([stamped(divergence="-", divergence_for="-",
+                                      verdict="REJECT",
+                                      lsp_today="DIAGNOSES(3)")]), [])
+    # The carry/expire decision itself, which lives inside a function that
+    # needs a live game -- so it is tested here, where it can be reached. Two
+    # mutations that disabled it were MISSED before this existed.
+    _probe = {"fixture": "fx", "verdict": "REJECT", "lsp_today": "CLEAN"}
+    check("B145: a note whose stamp still holds is carried across a regen",
+          carry_forward({"fx": ("a reason", "REJECT|CLEAN")}, _probe),
+          ("a reason", "REJECT|CLEAN"))
+    check("B145: a note whose stamp no longer holds is DROPPED, not carried",
+          carry_forward({"fx": ("a reason", "ACCEPT|DIAGNOSES(3)")}, _probe),
+          None)
+    check("B145: a fixture with no previous note carries nothing",
+          carry_forward({}, _probe), None)
+    check("B145: a placeholder note is not carried as if it were a reason",
+          carry_forward({"fx": ("-", "REJECT|CLEAN")}, _probe), None)
+    # And a freshly written row must be stamped with ITS OWN state, or the
+    # stamp stops describing what the note was written against.
+    _fresh = tsv_row(rec_of("REJECTED", [(1, 1, "boom")]), {"count": 0},
+                     "1.29.14", "2026-09-01", {"fx": "a fresh reason"})
+    check("B145: a freshly stamped note records this row's own measurement",
+          (_fresh["divergence"], _fresh["divergence_for"]),
+          ("a fresh reason", divergence_state(_fresh["verdict"],
+                                              _fresh["lsp_today"])))
+    check("B145: a row with no note carries no stamp",
+          tsv_row(rec_of("CLEAN"), {"count": 0}, "1.29.14",
+                  "2026-09-01")["divergence_for"], "-")
+
+    check("B145: divergence_state is the pair a divergence claim is ABOUT",
+          divergence_state("ACCEPT", "DIAGNOSES(3)"), "ACCEPT|DIAGNOSES(3)")
+    if divergence_state("ACCEPT", "CLEAN") == divergence_state("REJECT", "CLEAN"):
+        check("B145: divergence_state distinguishes the engine's verdict",
+              "collapsed", "distinct")
+
     # --- B145 follow-up: polarity agreement is not the same question -------
     # b102-array-sort-mismatched-callbacks declares `int &inout` at line 21,
     # which is not declarable. The engine emitted two errors there, compiled
@@ -1299,6 +1378,8 @@ def run_selftest() -> int:
                 "engine_compiled": "3", "lsp_today": "DIAGNOSES(12)",
                 "divergence": "-"}
         base.update(kw)
+        base.setdefault("divergence_for",
+                        divergence_state(base["verdict"], base["lsp_today"]))
         return base
 
     aborted = agreement_problems([reached_row(engine_compiled="0")])
@@ -1425,6 +1506,10 @@ def run_selftest() -> int:
                 "verdict": "REJECT", "lsp_today": "DIAGNOSES(3)",
                 "divergence": "-"}
         base.update(kw)
+        # Default the stamp to this row's own state, so a case that is not
+        # ABOUT expiry does not accidentally test expiry.
+        base.setdefault("divergence_for",
+                        divergence_state(base["verdict"], base["lsp_today"]))
         return base
 
     check("B145: engine REJECTED and LSP diagnosing is agreement",
@@ -1489,6 +1574,21 @@ def run_selftest() -> int:
         elif want not in got[0]:
             check(f"B145: the report for {label} says why", got, [want])
 
+    # A NOT-RUN row is settled by a stamped reason, and ONLY by one.
+    _nr = {"fixture": "fx", "build_status": "NOT-RUN", "verdict": "UNKNOWN",
+           "engine_compiled": "0", "lsp_today": "CLEAN"}
+    if not agreement_problems([dict(_nr, divergence="-", divergence_for="-")]):
+        check("B145: an unexplained NOT-RUN row is still reported", [],
+              ["<a problem>"])
+    check("B145: a NOT-RUN row with a stamped reason is a recorded finding, "
+          "not a permanent red — a gate that can never go green is ignored",
+          agreement_problems([dict(_nr, divergence="the name contains a slash",
+                                   divergence_for="UNKNOWN|CLEAN")]), [])
+    if not agreement_problems([dict(_nr, divergence="the name contains a slash",
+                                    divergence_for="UNKNOWN|DIAGNOSES(2)")]):
+        check("B145: a NOT-RUN row's reason expires like any other", [],
+              ["<a problem>"])
+
     # PAIR: a DECLARED divergence is data, not a failure. A check that refuses
     # every known gap would make the artifact impossible to commit at all.
     check("B145: a declared divergence is accepted — a known gap is a "
@@ -1504,6 +1604,8 @@ def run_selftest() -> int:
         rows = [tsv_row(rec_of("CLEAN"), {"count": 0}, "1.29.14", "2026-09-01")]
         rows[0]["fixture"] = "fx-a"
         rows[0]["divergence"] = "a hand-written note"
+        rows[0]["divergence_for"] = divergence_state(rows[0]["verdict"],
+                                                     rows[0]["lsp_today"])
         write_tsv(dest, rows, "1.29.14", "2026-09-01", "e" * 64)
         text = dest.read_text()
         for want in ("1.29.14", "2026-09-01", "e" * 64, "fx-a"):
@@ -1515,8 +1617,10 @@ def run_selftest() -> int:
         # The hand-written note is the ONLY authored field; a regen that drops
         # it turns every explained gap into an unexplained one, and the run
         # still looks green because the notes were what made it green.
-        check("B145: hand-written divergence notes survive a regen",
-              read_declared_divergences(dest), {"fx-a": "a hand-written note"})
+        check("B145: hand-written divergence notes survive a regen, WITH the "
+              "state each was written against",
+              read_declared_divergences(dest),
+              {"fx-a": ("a hand-written note", rows[0]["divergence_for"])})
         check("B145: a corpus that does not exist yet yields no notes rather "
               "than raising",
               read_declared_divergences(_b145 / "nope.tsv"), {})
@@ -1673,6 +1777,33 @@ def folder_warnings(rec: dict) -> list[dict]:
             and str(d.get("file", "")).split("/")[0] == fid]
 
 
+def divergence_state(verdict: str, lsp_today: str) -> str:
+    """The measurement a divergence note was written against.
+
+    B157/B168 found the same defect in two separate audits: a JUSTIFIED row
+    whose free-text reason WAS the false claim, so the audit accepted the
+    defect BECAUSE of the justification. Prose records that somebody was
+    convinced; it never records that they were right.
+
+    This artifact had a live instance of it within one regeneration.
+    `b102-array-sort-correct-callbacks` carried the note *"the engine rejects
+    all three 'correct' comparators and the LSP is silent on all three"*. After
+    lane-const's B152 moved those comparators to the sibling fixture, the same
+    row measured engine ACCEPT and LSP DIAGNOSES(3) -- BOTH HALVES INVERTED --
+    and the note carried across the regeneration unchanged. Nothing fired: the
+    stale-note rule only triggers when the two sides come to AGREE, and these
+    two still disagreed, just in the opposite direction.
+
+    So a note is stamped with the (verdict, LSP answer) pair it was written
+    against, and is carried across a regeneration ONLY while that pair still
+    holds. It cannot be verified -- prose never can -- but it can be made to
+    EXPIRE the moment its subject moves, which turns an unfalsifiable claim
+    into one with a shelf life. A note whose stamp no longer matches is
+    dropped, and the row goes back to demanding a fresh reason.
+    """
+    return f"{verdict}|{lsp_today}"
+
+
 def tsv_row(rec: dict, lsp: dict, engine_version: str, probe_date: str,
             divergences: dict[str, str] | None = None) -> dict:
     """One corpus row: the engine's answer and this LSP's, side by side."""
@@ -1722,13 +1853,15 @@ def tsv_row(rec: dict, lsp: dict, engine_version: str, probe_date: str,
         "lsp_today": lsp_says,
         "engine_version": engine_version,
         "probe_date": probe_date,
+        "divergence_for": (divergence_state(verdict, lsp_says)
+                           if divergences.get(slug) else "-"),
         "divergence": divergences.get(slug, "-"),
     }
 
 
 TSV_COLUMNS = ("fixture", "verdict", "build_status", "engine_compiled",
                "engine_message", "lsp_today", "engine_version", "probe_date",
-               "divergence")
+               "divergence_for", "divergence")
 
 
 def agreement_problems(rows: list[dict]) -> list[str]:
@@ -1747,12 +1880,40 @@ def agreement_problems(rows: list[dict]) -> list[str]:
         slug = row["fixture"]
         status, lsp = row["build_status"], row["lsp_today"]
         declared = (row.get("divergence") or "-").strip()
+        # A note must be stamped with the measurement it was written against,
+        # and the stamp must still hold. Checked FIRST, above every branch that
+        # a note could settle: an expired reason is not a reason about this
+        # row, and a hand-edited note with no stamp must not slip past the
+        # generator's expiry by being typed straight into the file.
+        if declared != "-":
+            stamp = (row.get("divergence_for") or "-").strip()
+            now = divergence_state(row.get("verdict", ""), lsp)
+            if stamp != now:
+                problems.append(
+                    f"{slug}: the divergence note is stamped for {stamp!r} but "
+                    f"this row now measures {now!r}. A reason written against a "
+                    f"different measurement is not evidence about this one, "
+                    f"however plausible it still reads -- rewrite it against "
+                    f"what is measured now, or delete it.")
+                continue
+
         if status in ("NOT-RUN", "BUILD-ERR"):
+            # Settled by a stamped note, like every other row. B129's rule is
+            # that an artifact which cannot be regenerated is a FINDING and is
+            # reported on every run -- reported, which a recorded reason does.
+            # Refusing it forever instead would leave the artifact permanently
+            # red for a fact about the fixture that nobody can change from
+            # here, and a gate that can never go green is one that gets
+            # ignored. What must not happen is the row reading as an ANSWER,
+            # and `verdict=UNKNOWN` plus a written reason is the opposite.
+            if declared != "-":
+                continue
             problems.append(
                 f"{slug}: the engine verdict is {status} -- the probe could "
                 f"not measure it, so this row is not evidence of anything. "
-                f"Re-probe it or remove the row; do not leave it recorded as "
-                f"though it were an answer.")
+                f"Record in `divergence` why it cannot be probed, or remove "
+                f"the row; do not leave it recorded as though it were an "
+                f"answer.")
             continue
         if lsp == "UNMEASURED":
             problems.append(
@@ -1838,6 +1999,16 @@ def write_tsv(path: Path, rows: list[dict], engine_version: str,
         "#                   answers; NOT-RUN and BUILD-ERR are the probe",
         "#                   saying it could not look, and are never recorded",
         "#                   as agreement.",
+        "#   engine_compiled how many `Compiling <sig>` lines the engine logged",
+        "#                   for THIS folder. Read it ONLY beside a REJECTED",
+        "#                   row, where 0 means the unit was rejected at",
+        "#                   DECLARATION time and the engine never reached a",
+        "#                   call site -- so its verdict covers the",
+        "#                   declarations and nothing else. On a CLEAN row 0",
+        "#                   carries no such meaning: a clean compile usually",
+        "#                   logs no per-function lines at all (15 of 20 clean",
+        "#                   rows here are 0). Do not read a clean 0 as",
+        "#                   'nothing was compiled'.",
         "#   engine_message  the engine's text, verbatim to the right of the",
         "#                   colon. The staging folder id is normalised away -",
         "#                   it is an artefact of the probe, not of the fixture",
@@ -1850,6 +2021,15 @@ def write_tsv(path: Path, rows: list[dict], engine_version: str,
         "#                   partial re-probe must not silently inherit the",
         "#                   file's stamp.",
         "#   probe_date      when this row was last measured.",
+        "#   divergence_for  the `verdict|lsp_today` the note beside it was",
+        "#                   written against. A reason is carried across a",
+        "#                   regeneration ONLY while that pair still holds.",
+        "#                   Prose cannot be verified -- B157 and B168 each",
+        "#                   found an audit whose JUSTIFIED row was defended by",
+        "#                   a reason that was itself the false claim -- but it",
+        "#                   CAN be made to expire when its subject moves. This",
+        "#                   artifact needed it: b102's note survived a full",
+        "#                   polarity flip and still read as a reason.",
         "#   divergence      why the two columns differ, or `-`. REQUIRED",
         "#                   wherever they differ, and REFUSED where they",
         "#                   agree - so neither an unexplained gap nor a stale",
@@ -1963,12 +2143,33 @@ def write_corpus(dest: Path, results: list[dict], *, all_fixtures: bool) -> int:
     binary = lsp_cli_bin()
     sha = _sha256(binary)
     date = time.strftime("%Y-%m-%d")
-    rows = []
-    declared = read_declared_divergences(dest)
+    previous = read_declared_divergences(dest)
+    rows, expired = [], []
     for rec in results:
         lsp = run_lsp_on_fixture(FIXTURES / rec["fixture"])
-        rows.append(tsv_row(rec, lsp, version, date, declared))
+        # Build the row with NO note first, so its freshly measured verdict and
+        # LSP answer are available to test the old note's stamp against.
+        probe_row = tsv_row(rec, lsp, version, date, {})
+        slug = probe_row["fixture"]
+        note, stamp = previous.get(slug, ("", ""))
+        now = divergence_state(probe_row["verdict"], probe_row["lsp_today"])
+        kept = carry_forward(previous, probe_row)
+        if kept:
+            probe_row["divergence"], probe_row["divergence_for"] = kept
+        elif note:
+            # EXPIRED. The measurement this reason was written against no
+            # longer holds, so the reason is not evidence about the current
+            # one -- however plausible it still reads.
+            expired.append(f"{slug}: written for {stamp!r}, now {now!r}\n"
+                           f"      dropped note: {note}")
+        rows.append(probe_row)
     rows.sort(key=lambda r: r["fixture"])
+    if expired:
+        print(f"\n{len(expired)} divergence note(s) EXPIRED and were dropped -- "
+              f"the state each was written against no longer holds:",
+              file=sys.stderr)
+        for e in expired:
+            print(f"  - {e}", file=sys.stderr)
     problems = agreement_problems(rows)
     write_tsv(dest, rows, version, date, sha)
     print(f"wrote {dest} ({len(rows)} rows, engine {version})")
@@ -1980,17 +2181,45 @@ def write_corpus(dest: Path, results: list[dict], *, all_fixtures: bool) -> int:
     return 0
 
 
-def read_declared_divergences(dest: Path) -> dict[str, str]:
-    """Carry hand-written `divergence` notes across a regen.
+def carry_forward(previous: dict, probe_row: dict) -> tuple[str, str] | None:
+    """The note to keep for this row, or None if it has EXPIRED.
 
-    They are the ONLY hand-authored field in the artifact, so a regen that
-    dropped them would silently convert every explained gap into an
-    unexplained one -- and the run would still look green because the notes
-    were what made it green.
+    Pure, and split out of `write_corpus` on purpose: that function needs a
+    live game, so the carry/expire decision inside it could never be exercised
+    offline -- and two mutations that disabled it were duly MISSED. A guard
+    that cannot be reached by a test is not a guard, and the remedy is the same
+    one the flag classification needed: extract the judgement, hand it
+    synthetic inputs, and let the mutation run confirm it bites.
+    """
+    slug = probe_row["fixture"]
+    entry = previous.get(slug)
+    if not entry:
+        return None
+    note, stamp = entry
+    if not note or note == "-":
+        return None
+    now = divergence_state(probe_row["verdict"], probe_row["lsp_today"])
+    if stamp != now:
+        return None
+    return note, now
+
+
+def read_declared_divergences(dest: Path) -> dict[str, tuple[str, str]]:
+    """Hand-written notes from the previous corpus, with the state each was
+    written against.
+
+    They are the ONLY field a regeneration cannot re-derive, so dropping them
+    wholesale would convert every explained gap into an unexplained one -- and
+    the run would still look green, because the notes were what made it green.
+
+    But carrying them UNCONDITIONALLY is how a note outlives its subject, which
+    is the B157/B168 defect and which this artifact reproduced within one
+    regeneration. So each note comes back with its `divergence_for` stamp and
+    the caller drops it unless the new measurement still matches.
     """
     if not dest.is_file():
         return {}
-    out: dict[str, str] = {}
+    out: dict[str, tuple[str, str]] = {}
     header = None
     for line in dest.read_text().splitlines():
         if line.startswith("#") or not line.strip():
@@ -2002,7 +2231,7 @@ def read_declared_divergences(dest: Path) -> dict[str, str]:
         row = dict(zip(header, cells))
         note = (row.get("divergence") or "-").strip()
         if row.get("fixture") and note != "-":
-            out[row["fixture"]] = note
+            out[row["fixture"]] = (note, (row.get("divergence_for") or "-").strip())
     return out
 
 

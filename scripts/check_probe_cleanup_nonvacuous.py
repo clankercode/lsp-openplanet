@@ -176,6 +176,45 @@ MUTATIONS = [
     ("B145: folder_warnings picks up ERRORS too, double-counting them",
      '            if d.get("sev") == "WARN"',
      '            if d.get("sev") in ("WARN", "ERR")'),
+    # --- B145 follow-up: a prose reason must EXPIRE when its subject moves --
+    # B157/B168's shape, reproduced live in this artifact within one
+    # regeneration: b102's note survived a polarity flip and still read as a
+    # reason. Prose cannot be verified; it CAN be made to expire.
+    ("B145: the stamp is never checked, so a note written against a different "
+     "measurement still settles the row — the b102 shape exactly",
+     "            if stamp != now:",
+     "            if False:"),
+    ("B145 OVER-CONDEMN: every note is treated as expired, so no gap can ever "
+     "be explained and the artifact cannot be committed at all",
+     "            if stamp != now:",
+     "            if True:"),
+    ("B145: divergence_state collapses the engine verdict, so a note survives "
+     "the engine changing its mind",
+     '    return f"{verdict}|{lsp_today}"',
+     '    return f"{lsp_today}"'),
+    ("B145: divergence_state collapses the LSP answer, so a note survives the "
+     "checker changing its mind",
+     '    return f"{verdict}|{lsp_today}"',
+     '    return f"{verdict}"'),
+    ("B145: divergence_state is constant, so no note ever expires",
+     '    return f"{verdict}|{lsp_today}"',
+     '    return "always"'),
+    ("B145: an expired note is carried across the regeneration anyway",
+     "    if stamp != now:\n        return None\n    return note, now",
+     "    return note, now"),
+    ("B145 OVER-CONDEMN: carry_forward drops every note, so a regeneration "
+     "silently converts every explained gap into an unexplained one",
+     "    return note, now",
+     "    return None"),
+    ("B145: a placeholder is carried as if it were a reason",
+     '    if not note or note == "-":\n        return None',
+     "    if False:\n        return None"),
+    ("B145: a freshly written row is stamped with a constant, so the stamp "
+     "stops describing the measurement it was written against",
+     '        "divergence_for": (divergence_state(verdict, lsp_says)\n'
+     '                           if divergences.get(slug) else "-"),',
+     '        "divergence_for": "-",'),
+
     # --- B145 follow-up: polarity agreement is not the same question -------
     ("B145: the declaration-abort rule is removed, so an engine that never "
      "reached a call site reads as agreeing with an LSP about call sites",

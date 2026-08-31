@@ -71,7 +71,9 @@ def mutations(header: list[str], rows: list[list[str]]):
     ver = col(header, "verdict")
     evs = col(header, "engine_version")
 
-    gap = find(rows, header, fixture="b102-array-sort-correct-callbacks")
+    rs_all = rows
+    gap = next(i for i, r in enumerate(rows)
+               if r[div].strip() != "-" and r[lsp] not in ("UNMEASURED",))
     agreeing = next(i for i, r in enumerate(rows)
                     if r[div].strip() == "-" and r[lsp] != "UNMEASURED")
     notrun = find(rows, header, verdict="UNKNOWN")
@@ -102,7 +104,46 @@ def mutations(header: list[str], rows: list[list[str]]):
     def leak_staging_id(rs):
         rs[agreeing][msg] = "lsp-issue-repro-fx/Main.as(1,1): something"
 
+    dfor = col(header, "divergence_for")
+    comp = col(header, "engine_compiled")
+    noted = next(i for i, r in enumerate(rs_all) if r[div].strip() != "-")
+    aborted = next(i for i, r in enumerate(rs_all)
+                   if r[comp].strip() == "0"
+                   and r[col(header, "build_status")] == "REJECTED"
+                   and r[lsp] not in ("CLEAN", "UNMEASURED"))
+
+    def unstamp_note(rs):
+        rs[noted][dfor] = "-"
+
+    def stamp_for_another_state(rs):
+        rs[noted][dfor] = "ACCEPT|DIAGNOSES(9999)"
+
+    def stamp_with_no_note(rs):
+        rs[agreeing][dfor] = "REJECT|CLEAN"
+
+    def drop_declaration_note(rs):
+        rs[aborted][div] = "-"
+        rs[aborted][dfor] = "-"
+
+    def hide_the_abort(rs):
+        rs[aborted][comp] = "7"
+
     return [
+        ("a divergence note loses its stamp, so a reason typed straight into "
+         "the file can never expire — the B157/B168 shape",
+         unstamp_note),
+        ("a divergence note is stamped for a DIFFERENT measurement, which is "
+         "how b102's note survived a full polarity flip and still read as a "
+         "reason",
+         stamp_for_another_state),
+        ("a stamp appears on a row with no note behind it",
+         stamp_with_no_note),
+        ("the reason is deleted from a row where the engine never reached a "
+         "call site, so a declaration-time rejection passes as agreement",
+         drop_declaration_note),
+        ("a declaration-time abort is recorded as having compiled bodies, so "
+         "the rule can never fire on it",
+         hide_the_abort),
         ("a declared divergence is DELETED from a row where the engine and "
          "this LSP genuinely disagree — the gap becomes invisible",
          drop_divergence),
