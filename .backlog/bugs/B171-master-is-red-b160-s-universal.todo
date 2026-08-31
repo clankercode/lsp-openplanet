@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T19:13:26Z"
 depends_on: []
 estimate_hours: 1
 id: B171
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'master is RED: B160''s universal ampersand rule is falsified by B145''s corpus, which the same batch merged - the engine writes to ''int3''. with no suffix, and our renderer now emits to ''int3&''.'
@@ -12,3 +14,75 @@ updated_at: "2026-08-31T19:13:26Z"
 ---
 
 master is RED: B160's universal ampersand rule is falsified by B145's corpus, which the same batch merged - the engine writes to 'int3'. with no suffix, and our renderer now emits to 'int3&'.
+
+MASTER DOES NOT PASS ITS OWN GATE. Verified by the coordinator on da0f4f5:
+
+  test the_engine_suffixes_every_measured_conversion_target ... FAILED
+  tests/b155_engine_wording_divergence.rs:157
+  some measured engine messages do NOT suffix the target:
+    ["Can't implicitly convert from 'const nat3' to 'int3'."]
+
+  test result: FAILED. 5 passed; 1 failed
+  Full log: x-alpha ~/.remote-builds/lsp-openplanet-bf0363fb/target/
+            test-suite-logs/20260831T191201-suite.log
+
+WHAT HAPPENED, and note that NEITHER MERGE WAS WRONG ON ITS OWN.
+
+B160 adopted the engine spelling unconditionally -- `to '{to}&'.` -- on a
+measurement of 22 of 22 messages carrying both marks. That population came from
+exactly two corpora: b071 (enum targets) and b144 (funcdef-handle targets).
+
+`corpus_files()` in b155_engine_wording_divergence.rs GLOBS EVERY .tsv IN
+docs/probes/, so it auto-ingests any corpus added later. The very next merge
+(B145, e28cdaf) added a third: b145-issue-repro-verdicts.tsv, 63 fixtures of
+live engine verdicts measured against 1.29.14 on 2026-09-01.
+
+Row 70, engine column, fixture 49-nat3-int3-conversion:
+
+  Main.as(9,17): Can't implicitly convert from 'const nat3' to 'int3'.
+  Main.as(12,17): No matching signatures to 'int3(const nat3&)'
+
+Full stop: YES. Ampersand: NO. The 22/22 uniformity was TRUE OF ITS SAMPLE and
+FALSE IN GENERAL -- both source corpora happened to carry reference targets.
+
+AND THE SAME ROW CARRIES THE DISCRIMINATOR. The second message writes
+`int3(const nat3&)` WITH an ampersand, because that parameter genuinely IS a
+reference. So the engine is not decorating conversion targets at all; it prints
+`&` when the type it is naming is a reference. Our renderer now appends one
+unconditionally.
+
+USER-VISIBLE CONSEQUENCE: for a value-type target we emit
+`to 'int3&'.` where the engine says `to 'int3'.` The CLI footer asks users to
+report differences from Openplanet's output, so this is a wrong message in the
+one place we have made an explicit commitment to exactness.
+
+THE FULL-STOP HALF OF B160 IS CORRECT AND SHOULD STAY. The engine message above
+ends with `.`, as do all 22. Only the ampersand half is refuted.
+
+THREE OPTIONS, none of them "pick an unconditional spelling":
+  A. Revert the `&`, keep the full stop. Correct for int3, WRONG for the 22
+     measured reference targets. Trades one wrong population for a larger one.
+  B. Make the `&` conditional on the target actually being a reference binding.
+     Correct, and the real work: it needs the target's binding kind at the
+     diagnostic site, which may not be available there today. Establish that
+     before promising it.
+  C. Re-measure first. The b145 corpus now gives a third population and the
+     discriminator is visible in a single row; derive the engine's actual rule
+     from all three corpora before writing any renderer change.
+
+RECOMMEND C THEN B. Do not choose an unconditional spelling to get master green
+-- an unconditional rule is what produced this.
+
+DO NOT "FIX" THIS BY NARROWING corpus_files() TO THE TWO ORIGINAL CORPORA. The
+glob is why the counterexample was found at all, and the test did exactly the job
+it was written for: it pinned a uniformity claim and fired the moment the claim
+stopped holding. Narrowing it would restore the green and delete the finding.
+
+This is also the second time in this batch that a 22/22-style uniformity has been
+treated as "no per-case judgement required". See docs/verification-hazards.md,
+"A detector that cannot see the counterexample gives a confident wrong answer",
+and the entry on predicting the count before the run -- a sample can be uniform
+because the sampling frame was uniform.
+
+Related: B160 (the decision), B155 (the pin that caught it), B145 (the corpus
+that refuted it), B165 (merged alongside B160).
