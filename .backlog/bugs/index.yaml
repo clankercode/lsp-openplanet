@@ -131,3 +131,4 @@ bugs:
     - file: B130-consume-engine-method-constnes.todo
     - file: B131-coremethod-is-protected-is-the.todo
     - file: B132-remote-build-py-gates-a-dirty.todo
+    - file: B133-enum-value-doc-strings-are-dro.todo
