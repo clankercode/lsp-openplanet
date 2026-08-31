@@ -1,0 +1,27 @@
+---
+complexity: medium
+created_at: "2026-08-31T10:44:45Z"
+depends_on: []
+estimate_hours: 2
+id: B106
+priority: high
+status: pending
+tags: []
+title: just rtest reports exit 0 when the remote build actually failed (x-alpha ENOSPC false green)
+updated_at: "2026-08-31T10:44:45Z"
+---
+## Observed (2026-08-31, live incident)
+
+x-alpha hit 100% disk (0 bytes free). A lane's 'just rtest' run there exited 0 while the underlying remote cargo build had FAILED with 'No space left on device'. Any automation trusting the exit code reports a false green. The SUITE-VERIFIED line protocol is the existing guard (a run without the line is not a pass), but the exit code contradicting the actual outcome defeats scripted gating and invites human error.
+
+## Expected
+
+scripts/remote-build.py must propagate the remote command's real exit status through every path (build failure, rsync failure, ssh drop, ENOSPC mid-compile). A failed remote step can never surface as exit 0 locally.
+
+## Notes
+
+- Incident context: freed ~9GB on x-alpha (stale b090/nav remote trees); box remains ~99% full — ~/src (170G) and ~/.cargo (91G) are the consumers, flagged to Max.
+- Consider a cheap pre-flight in remote-build.py: check free space on the remote target filesystem and fail loudly with a clear message when below a floor (e.g. 10G), naming the host and suggesting the LSP_REMOTE_HOST=x-tuf override.
+- Related incomplete-run hazard family: B078, B085, B092 (cargo stops at first failing binary). This is the same class — a green signal that does not mean what it says — but at the transport layer.
+- Repro shape: fill the remote target fs (or a quota'd test dir), run just rtest, observe local exit 0 + failed build output.
+- x-tuf works as fallback (LSP_REMOTE_HOST=x-tuf; just is now installed there).
