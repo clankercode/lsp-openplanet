@@ -3811,3 +3811,74 @@ green. That is not chance: the construct that loses a population is nearly
 always one that also suppresses the error explaining why, so the same defect
 that empties the set hides the reason it emptied. Assume any green produced by
 a filter is a nothing-ran zero until its denominator is on screen.
+
+## A reconciling suite total cannot distinguish a set from its cardinality
+
+lane-enum inserted a test and the insertion landed **between `#[test]` and an
+existing test**. That silently disabled `hover_rejects_nadeo_class_storage_key`
+and double-registered one of its own. **The suite total reconciled exactly** —
+`+1` duplicate and `−1` disabled cancelled — so the delta arithmetic this batch
+runs on produced a clean, correct-looking green over a disabled test. Nothing in
+the suite could see it. `cargo clippy` found it, via `dead_code` and
+`duplicate_macro_attributes`.
+
+**The rule: a reconciling total is a NECESSARY check and never a SUFFICIENT
+one.** A count is the cardinality of a set, and cardinality is preserved by any
+even-numbered swap. The cheapest such swap — one test disabled while one is
+added — is also **the likeliest**, because it is exactly what a misplaced
+insertion produces by default.
+
+**THE EXACTNESS IS WHAT MADE IT DANGEROUS.** A total that came out *near* the
+expected number would have been investigated. Coming out precisely right retired
+the question. So this hazard gets **worse as a team's arithmetic discipline
+improves**: it specifically defeats lanes that reconcile carefully and leaves
+sloppy ones untouched. Every "+11, +1 binary, reconciles exactly" in this batch
+is the state in which this defect is invisible.
+
+### Name the mechanism, because it has no type-system consequence
+
+The defect is **an insertion between an attribute and the item it decorates**.
+That is a text-editing failure mode, not a semantic one: the result compiles,
+because a second `#[test]` on one function and a now-attributeless function are
+both legal Rust. Nothing in a normal build objects. Only a lint sees it.
+
+**This is the concrete argument for the clippy delta being a GATE rather than a
+courtesy.** It is the first time in this batch the delta caught something the
+suite **structurally could not** — not something the suite happened to miss, but
+a class of defect no count over test results can ever detect. A gate that only
+ever agrees with the suite is redundant; this one earned its place by
+disagreeing.
+
+### The fix is set comparison — and the set comparison needs its own proof
+
+Compare the SET of test names across the rebase, not the count. But a set check
+built by scraping test output is not automatically trustworthy, and lane-enum's
+first pass proved it: it reported a phantom tenth added test **in a file it never
+touched**, because a stderr warning from a parallel test had interleaved into an
+`... ok` line and defeated its `^test` anchor.
+
+**A log-scraping check over PARALLEL test output is vulnerable to interleaving —
+which is the same shape as the failure it was written to detect.** The pairing is
+the lesson, not the anecdote: an instrument built to catch a silent set change
+was itself silently reporting a wrong set. And note the polarity that did not
+happen: the interleave landed on an unrelated line and produced a phantom
+ADDITION, which is merely confusing. Had it landed on one of the lane's own
+lines it would have reported a test **removed** — and that is the alarm a lane
+would have believed and acted on.
+
+So: prove the set check the same way anything else here is proven — feed it a
+known-disabled test and require it to say so — before its zero counts.
+
+### Where this sits among the others
+
+A disabled test and a nothing-ran filter are **the same loss reached from
+opposite ends**: an assertion that did not execute. One removes the assertion
+and keeps the population; the other keeps the assertion and removes the
+population. Both then report a zero that is indistinguishable from a real one,
+which is the rule recorded under the nothing-ran entry and, for a probe's reach
+rather than a gate's denominator, under the EXPOSURE entry.
+
+The illustration from the same night, kept short because it is an illustration:
+lane-unused read ten commits on master as ten merges landed, having never asked
+what the commits touched — the denominator was on screen, the units were not,
+and one `git log --name-only` distinguished them.
