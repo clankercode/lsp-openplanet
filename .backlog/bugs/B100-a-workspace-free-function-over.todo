@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T09:35:13Z"
 depends_on: []
 estimate_hours: 1
 id: B100
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'A workspace free-function overload set reaches no argument check at all: not arity, not types, not funcdef slots'
@@ -24,3 +26,69 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Found by lane-enum while generalising B089 (2026-08-31). Pinned, not fixed:
+`a_workspace_free_function_overload_set_is_a_different_gap` holds the case so
+nobody reads that silence as something B089 caused.
+
+## Defect
+
+When a workspace FREE FUNCTION has two or more overloads, a call to it reaches
+**no argument checking of any kind** — not arity, not primitive types, not
+funcdef slots.
+
+`lookup_function_return` returns `None` the moment two workspace symbols share
+a name (the deliberate "ambiguous, say nothing" arm — the same arm B084 fixed
+for *crediting*). `call_type` then falls through to the `has_global_ident` arm,
+which suppresses the undefined-identifier diagnostic and only walks the
+arguments for their own errors. Nothing compares them to any signature.
+
+Workspace METHODS do not have this hole: they produce real overload sets via
+`lookup_method_overloads_with_inheritance`.
+
+## How it was found, and why that matters
+
+**It was found by a test passing when it should not have.** lane-enum's first
+draft of B089's over-firing gate asserted that an overload set with one matching
+candidate stays silent — and it passed VACUOUSLY, because the set logic never
+ran at all on a free-function set. It was rewritten onto methods, which produce
+real sets.
+
+So the discovery came from asking "why did my negative case pass?" rather than
+from a failing test. Worth stating because it is the same family as B088's
+vacuous silence and B097's non-discriminating control: **a test that passes for
+a reason you have not identified is not yet evidence.**
+
+## Relationship to B084
+
+B084 fixed the CREDITING half of this same arm: an overloaded global function
+was called and never recorded as used. This is the CHECKING half of the same
+arm, still open. One `lookup_function_return` restriction, two consequences,
+one fixed and one not.
+
+## Work
+
+Give the Ident-callee path an overload-set entry point, the way the method path
+already has one. Note this is the direction that ADDS diagnostics, so it needs
+the B060 treatment: measure the false-positive surface across the plugin corpora
+before believing it, and pin an over-firing gate that a real overload set
+actually exercises — which, per the discovery above, means checking that the
+gate is not vacuous.
+
+## Test plan
+
+Red: a workspace free function overloaded 2x, called with an argument matching
+NO candidate, must diagnose. Generalise per CLAUDE.md across arity mismatch,
+primitive type mismatch, and a funcdef-slot mismatch (B089's subject), each in
+both the bare and namespaced spelling.
+
+Required silences in the same fixture: a call matching exactly one candidate; a
+call matching one of three; and — the gate that catches a vacuous suite — an
+assertion that the overload-set path actually EXECUTED for these cases, not just
+that no diagnostic appeared.
+
+## Related
+
+B089 (which pinned this and fixed the reachable positions), B084 (the crediting
+half of the same arm), B060 (the false-positive precedent for widening an
+argument rule), B088 / B097 (the same "why did this pass?" family).
