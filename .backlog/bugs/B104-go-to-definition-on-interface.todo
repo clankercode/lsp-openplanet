@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-31T10:22:20Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T12:57:54Z"
 complexity: medium
 created_at: "2026-08-31T10:17:38Z"
 depends_on: []
+duration_minutes: 155.56908150856665
 estimate_hours: 2
 id: B104
 priority: medium
 started_at: "2026-08-31T10:22:20Z"
-status: in_progress
+status: done
 tags: []
 title: Go to definition on interface/overridden methods should offer all implementations, not one location
-updated_at: "2026-08-31T10:22:20Z"
+updated_at: "2026-08-31T12:57:54Z"
 ---
 ## Expected Behavior
 
