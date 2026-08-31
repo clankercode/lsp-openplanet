@@ -565,6 +565,30 @@ def reconcile(
     return 1, "\n".join(report)
 
 
+def save_full_output(lines: list[str], report: str) -> Path | None:
+    """Write the complete run to a file and return its path.
+
+    B092 exists and cannot name its own failing binary, because the first
+    occurrence was captured with `| tail -6` and the verdict line naming the
+    binary was above the cut. A gate whose diagnosis only exists on a terminal
+    someone was tailing is a gate that cannot be investigated after the fact,
+    and an intermittent is precisely the thing you only get one look at.
+
+    Written on FAILURE only: a green run's output is reproducible on demand,
+    a red intermittent's is not.
+    """
+    target_dir = Path(os.environ.get("CARGO_TARGET_DIR") or (REPO_ROOT / "target"))
+    stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+    path = target_dir / "test-suite-logs" / f"{stamp}-suite.log"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join([*lines, "", report, ""]))
+    except OSError as exc:  # pragma: no cover - diagnostics must not mask the failure
+        print(f"(could not save the full output: {exc})", file=sys.stderr)
+        return None
+    return path
+
+
 def run_gate(extra: list[str]) -> int:
     cargo_args, _libtest_args = split_cargo_args(extra)
     filtered = names_a_target(cargo_args)
@@ -601,6 +625,17 @@ def run_gate(extra: list[str]) -> int:
         declared=declared,
         load=watch.describe(),
     )
+    if status:
+        saved = save_full_output(lines, report)
+        if saved:
+            # Deliberately the LAST line, so it survives `| tail`. That is not
+            # a joke: B092 lost its evidence to `| tail -6`.
+            report += (
+                f"\n\nFull output of this run, verdict included, saved to:\n"
+                f"  {saved}\n"
+                f"Attach that, not a tail, if you report this. An intermittent "
+                f"is the one case you cannot re-run to recover."
+            )
     print(report, file=sys.stderr if status else sys.stdout)
     return status
 
@@ -779,6 +814,17 @@ def run_selftest() -> int:
             "a run with no load samples claimed a load anyway — an unmeasured "
             "value must read as unmeasured"
         )
+    saved = save_full_output(["a line", "another"], "a verdict")
+    if saved is None or not saved.exists():
+        problems.append("the full-output capture did not write a file")
+    else:
+        body = saved.read_text()
+        if "a line" not in body or "a verdict" not in body:
+            problems.append(
+                "the saved output is missing either the run or the verdict — "
+                "B092 could not name its binary because the verdict was cut off"
+            )
+        saved.unlink(missing_ok=True)
     if "does NOT retry" not in segv_report:
         problems.append(
             "the verdict no longer states that it does not retry; a gate that "

@@ -285,16 +285,34 @@ with the test is not a control, it is a second test.
 
 Two consequences worth knowing before you spend an afternoon on it:
 
-1. `scripts/issue_repro_game.py` is blocked by this, and its `--selftest` is
-   offline-only, so it stays green.
-   `scripts/probe_enum_corpus.py` is believed **NOT** blocked, and this is worth
-   knowing before you rewrite it: it IGNORES `load_plugin`'s result, sleeps, and
-   reads the game log, so Openplanet's own file watcher is what compiles the
-   staged folder. B068's sentinel makes a silent non-compile impossible to
-   mistake for success — every name returns UNDETERMINED unless the sentinel
-   diagnostic proves analysis reached the last line. That is also how the
-   shipped corpora were produced at all, given `load_plugin` never worked.
-   Verify before relying on it.
+1. **Both `scripts/issue_repro_game.py` AND `scripts/probe_enum_corpus.py` are
+   blocked.** `issue_repro_game.py`'s `--selftest` is offline-only, so it stays
+   green regardless.
+
+   `probe_enum_corpus.py` was believed NOT blocked, on the reasoning that it
+   ignores `load_plugin`'s result, sleeps, and reads the game log — so
+   Openplanet's own file watcher would compile the staged folder. **Measured
+   2026-08-31, and that is false.** A fresh folder staged into `Plugins/` and
+   left for 8 seconds with no load call produced nothing in the log; the same
+   folder loaded explicitly through `tm-control-mcp` produced its deliberate
+   compile error immediately. The positive control is what makes the negative
+   readable — without it, "no diagnostic" is indistinguishable from "the probe
+   cannot see diagnostics".
+
+   Confirmed end to end: `echo 'UI::VirtualKey' | scripts/probe_enum_corpus.py
+   --names - --template TYPE` — a spelling the shipped b052 corpus records as
+   ACCEPTED — comes back **UNDETERMINED** today.
+
+   **B068's sentinel is what makes that visible rather than catastrophic.** The
+   probe did not record a false ACCEPT; it reported "analysis did not reach the
+   end", re-probed in isolation, and refused to certify. This is the guard
+   working in production, on exactly the failure it was built for.
+
+   What this does NOT say: the shipped b052/b053 corpora are still a valid
+   record of what the game said on 2026-08-30. What it does say is that the
+   EXPLANATION above for how they were produced is wrong, so how they were
+   produced is an open question — and that re-probing does not work today
+   without routing through `tm-control-mcp`.
 2. The `unload_plugin` that follows a failed load is split the same way, so
    `holder.preserve()` fires — correctly — and **leaves the fixture installed**.
    That blocks every later probe from every lane until someone removes it by
