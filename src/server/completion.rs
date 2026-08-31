@@ -19,7 +19,7 @@ use crate::server::diagnostics::position_to_offset;
 use crate::server::scope_query;
 use crate::symbols::scope::SymbolKind;
 use crate::symbols::SymbolTable;
-use crate::typedb::TypeIndex;
+use crate::typedb::{ScopeMemberKind, TypeIndex};
 
 pub fn complete(
     analysis: &crate::analysis::DocumentAnalysis,
@@ -122,6 +122,11 @@ fn extract_namespace_prefix(prefix: &str) -> Option<String> {
 /// `lookup_source_enum` filters anonymous entries, which is the B016 guard:
 /// a member-enum key is synthesized from its declaring context and names
 /// nothing the game accepts.
+///
+/// B099: the fall-through carries a KIND per member now. That the enum
+/// branches sit above it is also why `source_scope_members` has no
+/// enum-value case and needs none — it is only reached for a real scope,
+/// and an enum is not one.
 fn complete_namespace_members(
     namespace: &str,
     type_index: Option<&TypeIndex>,
@@ -146,16 +151,31 @@ fn complete_namespace_members(
             .map(|(name, _)| make_item(name, CompletionItemKind::ENUM_MEMBER))
             .collect();
     }
-    // NOTE (B088): every member below is emitted as FUNCTION, including
-    // nested namespaces and types. That is pre-existing and wrong, but it is
-    // a visible change to cases this ticket did not touch and
-    // `source_scope_members` returns bare names with no kind to key on, so
-    // it is reported rather than silently altered here.
+    // B099: the index says what each member IS; before it did not, and
+    // everything here was emitted as FUNCTION.
     index
         .source_scope_members(namespace)
         .into_iter()
-        .map(|name| make_item(&name, CompletionItemKind::FUNCTION))
+        .map(|(name, kind)| make_item(&name, scope_member_completion_kind(kind)))
         .collect()
+}
+
+/// The editor-facing kind for a scope member (B099).
+///
+/// Deliberately the same mapping the WORKSPACE symbol path uses in
+/// [`complete_identifier`] — including `Funcdef` → `INTERFACE`, which is
+/// what `SymbolKind::Funcdef` already resolves to there. A funcdef declared
+/// by the plugin and one declared by the engine are the same kind of thing
+/// to the user, and giving them two icons would be a difference with no
+/// meaning behind it.
+fn scope_member_completion_kind(kind: ScopeMemberKind) -> CompletionItemKind {
+    match kind {
+        ScopeMemberKind::Namespace => CompletionItemKind::MODULE,
+        ScopeMemberKind::Class => CompletionItemKind::CLASS,
+        ScopeMemberKind::Enum => CompletionItemKind::ENUM,
+        ScopeMemberKind::Funcdef => CompletionItemKind::INTERFACE,
+        ScopeMemberKind::Function => CompletionItemKind::FUNCTION,
+    }
 }
 
 /// The values of a WORKSPACE enum spelled exactly `qualified`, or `None`
@@ -2006,5 +2026,284 @@ mod b088_enum_values_after_colon_colon {
             !got.iter().any(|l| l == "Red"),
             "`Ns::` must not spill values of `Ns::Colour`: {got:?}"
         );
+    }
+}
+
+/// B099: every member offered after `Ns::` was labelled `FUNCTION`.
+///
+/// Reported by B088 rather than fixed there, because the information is
+/// discarded one level down: [`TypeIndex::source_scope_members`] returned
+/// bare names, so `complete_namespace_members` had nothing to key on and
+/// guessed. An editor therefore drew a nested namespace, a class, an enum
+/// and a funcdef with a function icon.
+///
+/// **This is NOT the same defect as B088**, and that was worth checking
+/// rather than assuming. B088's gap was that an ENUM offered no values after
+/// `::`; it was fixed by a branch that runs BEFORE this walk, because an
+/// enum is not a scope (`scope_exists` is false for one, pinned by
+/// `an_enum_is_still_not_a_namespace_scope_for_the_typechecker`). So
+/// `source_scope_members` never needing to read `EnumInfo::values` is
+/// correct, not a second half of the same bug: it is only ever called with a
+/// real scope, and a real scope's members are types, functions and nested
+/// scopes. `an_enum_type_and_its_values_come_from_different_paths` pins that
+/// separation from both sides.
+#[cfg(test)]
+mod b099_namespace_member_kinds {
+    use super::*;
+
+    fn real_index() -> crate::typedb::TypeIndex {
+        let fixtures =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+        crate::typedb::TypeIndex::load(
+            &fixtures.join("OpenplanetCore.json"),
+            &fixtures.join("OpenplanetNext.json"),
+        )
+        .expect("typedb fixtures must load")
+    }
+
+    /// Every `(label, kind)` completion offers after `scope::`, through the
+    /// real handler rather than the index directly — the kind the EDITOR
+    /// receives is the thing under test.
+    fn after_scope(
+        scope: &str,
+        idx: &crate::typedb::TypeIndex,
+    ) -> Vec<(String, CompletionItemKind)> {
+        let src = format!("void f() {{ {scope}:: }}");
+        let marker = format!("{scope}::");
+        let byte = src.find(&marker).expect("marker present") + marker.len();
+        let prefix = &src[..byte];
+        let line = prefix.matches('\n').count() as u32;
+        let col = prefix.rfind('\n').map_or(byte, |nl| byte - nl - 1) as u32;
+        let analysis = crate::analysis::DocumentAnalysis::analyze_plain(&src);
+        complete(
+            &analysis,
+            None,
+            Position::new(line, col),
+            Some(idx),
+            None,
+            &[],
+            false,
+        )
+        .into_iter()
+        .map(|i| (i.label, i.kind.expect("every item carries a kind")))
+        .collect()
+    }
+
+    fn kind_of(
+        members: &[(String, CompletionItemKind)],
+        label: &str,
+    ) -> Option<CompletionItemKind> {
+        members
+            .iter()
+            .find(|(l, _)| l == label)
+            .map(|(_, k)| *k)
+    }
+
+    /// THE REPORT. `UI::` is the one Core scope that yields every member
+    /// class at once, so a single assertion covers all five.
+    #[test]
+    fn a_core_namespace_labels_every_member_class_correctly() {
+        let idx = real_index();
+        let members = after_scope("UI", &idx);
+        for (label, want) in [
+            // A nested namespace, not a function.
+            ("Plot", CompletionItemKind::MODULE),
+            // Classes.
+            ("DrawList", CompletionItemKind::CLASS),
+            ("Texture", CompletionItemKind::CLASS),
+            ("ListClipper", CompletionItemKind::CLASS),
+            // Enums — the TYPE, offered here; its values come from B088's
+            // separate path.
+            ("Cond", CompletionItemKind::ENUM),
+            ("WindowFlags", CompletionItemKind::ENUM),
+            // Funcdefs, which the workspace path already labels INTERFACE.
+            ("InputTextCallback", CompletionItemKind::INTERFACE),
+            ("NodTreeMemberCallback", CompletionItemKind::INTERFACE),
+            // …and functions, which must not regress.
+            ("Begin", CompletionItemKind::FUNCTION),
+            ("SliderFloat", CompletionItemKind::FUNCTION),
+        ] {
+            assert_eq!(
+                kind_of(&members, label),
+                Some(want),
+                "`UI::{label}` should be {want:?}"
+            );
+        }
+    }
+
+    /// The same question asked of scopes reached by DIFFERENT routes, so the
+    /// fix cannot be keyed to `UI` by accident: a second Core namespace, one
+    /// whose members are all Core-sourced, one carrying funcdefs, and a
+    /// NADEO class scope (whose source name has the loader's synthetic
+    /// module segment dropped).
+    #[test]
+    fn other_scopes_and_the_nadeo_route_agree() {
+        let idx = real_index();
+        for (scope, label, want) in [
+            ("Meta", "RunContext", CompletionItemKind::ENUM),
+            ("Meta", "Plugin", CompletionItemKind::CLASS),
+            ("Meta", "GetPluginFromID", CompletionItemKind::FUNCTION),
+            ("nvg", "Paint", CompletionItemKind::CLASS),
+            ("nvg", "Winding", CompletionItemKind::ENUM),
+            ("Dev", "ProcIntercept", CompletionItemKind::INTERFACE),
+            ("Dev", "HookInfo", CompletionItemKind::CLASS),
+            // Nadeo route: `Game::CGameMenu::EMenuOrder` is written
+            // `CGameMenu::EMenuOrder` in source.
+            ("CGameMenu", "EMenuOrder", CompletionItemKind::ENUM),
+        ] {
+            let members = after_scope(scope, &idx);
+            assert_eq!(
+                kind_of(&members, label),
+                Some(want),
+                "`{scope}::{label}` should be {want:?}, got {:?}",
+                kind_of(&members, label)
+            );
+        }
+    }
+
+    /// A name that is BOTH a class and a nested namespace. `UI::Font` is a
+    /// class, and `UI::Font::Default` hangs three accessors off a namespace
+    /// of the same name, so the walk sees it twice and the answer has to be
+    /// decided rather than left to iteration order.
+    ///
+    /// The DECLARATION wins. `UI::Font` is a type you can write in a
+    /// declaration; the same-named namespace exists only as a container for
+    /// its default instances, and labelling it MODULE would hide the type.
+    /// One entry either way — the member set must not grow a duplicate.
+    #[test]
+    fn a_name_that_is_both_a_class_and_a_namespace_resolves_to_the_class() {
+        let idx = real_index();
+        let members = after_scope("UI", &idx);
+        let fonts: Vec<_> = members.iter().filter(|(l, _)| l == "Font").collect();
+        assert_eq!(fonts.len(), 1, "one entry for `UI::Font`, got {fonts:?}");
+        assert_eq!(fonts[0].1, CompletionItemKind::CLASS);
+        // Not vacuous: the namespace really is there, and really is a scope.
+        assert!(idx.scope_exists("UI::Font"));
+        assert!(idx.scope_exists("UI::Plot"));
+    }
+
+    /// THE B080 CONTROL. A refactor that changes a return TYPE must be
+    /// proved to leave the VALUES alone, so this pins the member NAME set
+    /// and must pass both before and after the change — unlike every other
+    /// test here, it is not expected to go red first.
+    ///
+    /// The non-function members are pinned exactly (they are the ones whose
+    /// kind changes), and the total count guards the function majority
+    /// against a silent drop or duplicate.
+    #[test]
+    fn the_member_name_set_is_unchanged_by_the_kind_refactor() {
+        let idx = real_index();
+        let members = after_scope("UI", &idx);
+        assert_eq!(members.len(), 257, "member count for `UI::`");
+
+        let mut non_functions: Vec<&str> = members
+            .iter()
+            .filter(|(l, _)| {
+                // Named rather than kind-filtered, so this control does not
+                // depend on the very field under test.
+                [
+                    "ButtonFlags", "ChildFlags", "Col", "ColorEditFlags", "ComboFlags", "Cond",
+                    "DrawList", "FocusedFlags", "Font", "HoveredFlags", "InputBlocking",
+                    "InputFlags", "InputTextCallback", "InputTextCallbackData", "InputTextFlags",
+                    "ItemFlags", "Key", "ListClipper", "MouseButton", "MouseCursor",
+                    "NodTreeMemberCallback", "Plot", "SelectableFlags", "SeparatorFlags",
+                    "SliderFlags", "SortDirection", "StyleVar", "TabBarFlags", "TabItemFlags",
+                    "TableBgTarget", "TableColumnFlags", "TableColumnSortSpecs", "TableFlags",
+                    "TableRowFlags", "TableSortSpecs", "Texture", "TreeNodeFlags", "WindowFlags",
+                ]
+                .contains(&l.as_str())
+            })
+            .map(|(l, _)| l.as_str())
+            .collect();
+        non_functions.sort_unstable();
+        assert_eq!(
+            non_functions.len(),
+            38,
+            "every pinned non-function member must still be offered, got {non_functions:?}"
+        );
+
+        let meta = after_scope("Meta", &idx);
+        assert_eq!(meta.len(), 34, "member count for `Meta::`");
+    }
+
+    /// The B088/B099 SEPARATION, pinned from both sides: an enum TYPE is a
+    /// member of its namespace, and its VALUES are not — they come from the
+    /// branch that runs before this walk.
+    #[test]
+    fn an_enum_type_and_its_values_come_from_different_paths() {
+        let idx = real_index();
+        let ns = after_scope("Meta", &idx);
+        assert_eq!(kind_of(&ns, "RunContext"), Some(CompletionItemKind::ENUM));
+        assert!(
+            kind_of(&ns, "Main").is_none(),
+            "`Meta::` must not offer an enum VALUE, got {ns:?}"
+        );
+
+        let values = after_scope("Meta::RunContext", &idx);
+        assert_eq!(
+            kind_of(&values, "Main"),
+            Some(CompletionItemKind::ENUM_MEMBER),
+            "`Meta::RunContext::` still offers its values (B088)"
+        );
+        assert!(
+            kind_of(&values, "RunContext").is_none(),
+            "the enum does not contain itself"
+        );
+    }
+
+    /// A path that is not a scope offers nothing, with a positive control so
+    /// the emptiness is not the whole test.
+    #[test]
+    fn a_path_that_is_not_a_scope_offers_nothing() {
+        let idx = real_index();
+        assert!(after_scope("ZzzNotAScope", &idx).is_empty());
+        assert!(!after_scope("UI", &idx).is_empty(), "positive control");
+    }
+
+    /// The ticket's test plan asks for a WORKSPACE namespace as a third
+    /// route into `source_scope_members`. MEASURED: there is none. That
+    /// function is typedb-only, and a plugin's own `namespace Helper {}`
+    /// falls through the enum branch, then `source_name_key`, then
+    /// `scope_exists`, and comes out empty — so `Helper::` offers nothing at
+    /// all, with or without a kind.
+    ///
+    /// A real gap, but a DIFFERENT one: a missing producer, not a
+    /// mislabelled one. Pinned here so the next reader finds the measurement
+    /// rather than repeating it, and so that whoever adds that producer sees
+    /// this test go red and knows to update it.
+    #[test]
+    fn a_workspace_namespace_reaches_this_path_not_at_all() {
+        let idx = real_index();
+        let src = "namespace Helper { void DoThing() {} }\nvoid f() { Helper:: }";
+        let ws = crate::server::test_support::TestWorkspace::one_file("compl.as", src);
+        let byte = src.find("Helper:: }").expect("marker") + "Helper::".len();
+        let prefix = &src[..byte];
+        let line = prefix.matches('\n').count() as u32;
+        let col = prefix.rfind('\n').map_or(byte, |nl| byte - nl - 1) as u32;
+        let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
+        let items = complete(
+            &analysis,
+            None,
+            Position::new(line, col),
+            Some(&idx),
+            Some(ws.snapshot.symbols()),
+            &[],
+            false,
+        );
+        assert!(
+            items.is_empty(),
+            "`Helper::` offers nothing today; got {:?}",
+            items.iter().map(|i| &i.label).collect::<Vec<_>>()
+        );
+        // Not vacuous: the workspace really does declare the member, and the
+        // same call shape really does produce items for a typedb scope.
+        assert!(
+            ws.snapshot
+                .symbols()
+                .all_symbols()
+                .any(|sym| sym.name == "Helper::DoThing"),
+            "test premise: the workspace declares Helper::DoThing"
+        );
+        assert!(!after_scope("UI", &idx).is_empty(), "positive control");
     }
 }

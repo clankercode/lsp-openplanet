@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use super::core_format::{CoreClass, CoreDatabase};
@@ -60,6 +60,29 @@ pub struct TypeIndex {
     /// an index assembled by hand (see [`Self::new`]), which no loader path
     /// produces.
     versions: TypeDbVersions,
+}
+
+/// What a member of a source scope IS (B099).
+///
+/// [`TypeIndex::source_scope_members`] draws from three places — the
+/// declaration tables, the function table, and the scope set — and the
+/// editor draws a different icon for each answer. The declaration half is
+/// split three ways rather than reported as one "type", because the index
+/// already knows which table a key came from and collapsing that here would
+/// repeat the information loss B099 was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ScopeMemberKind {
+    /// A nested namespace or class scope (`UI::Plot`).
+    Namespace,
+    /// A registered class or struct.
+    Class,
+    /// A named (non-anonymous) enum TYPE. Its VALUES are not members of the
+    /// enclosing scope — see `complete_namespace_members`.
+    Enum,
+    /// A function-handle typedef (`UI::InputTextCallback`).
+    Funcdef,
+    /// A free function in the scope, including virtual-property accessors.
+    Function,
 }
 
 #[derive(Debug, Clone)]
@@ -1025,19 +1048,36 @@ impl TypeIndex {
     }
 
     /// Direct source-writable members of a real scope, in deterministic
-    /// order. Names are derived from the same origin-aware spellings used by
-    /// the resolver, so storage prefixes cannot leak into editor output.
-    pub fn source_scope_members(&self, scope: &str) -> Vec<String> {
+    /// order, each with WHAT IT IS. Names are derived from the same
+    /// origin-aware spellings used by the resolver, so storage prefixes
+    /// cannot leak into editor output.
+    ///
+    /// B099: this used to return bare names. The three sources below already
+    /// say what each member is, and throwing that away on the way out left
+    /// the only consumer — namespace completion — nothing to key on, so it
+    /// guessed FUNCTION for every member and drew nested namespaces, classes
+    /// and enums with a function icon. A lossy return type; the kind is the
+    /// missing half.
+    ///
+    /// PRECEDENCE, because the sources really do collide: `UI::Font` is a
+    /// class AND a namespace (`UI::Font::Default` hangs three accessors off
+    /// it). The declaration wins — it is the thing you can write in a type
+    /// position, while the same-named namespace is only a container for its
+    /// default instances. Spelled with `or_insert` in a fixed source order
+    /// rather than left to whichever loop happens to run first.
+    pub fn source_scope_members(&self, scope: &str) -> Vec<(String, ScopeMemberKind)> {
         if !self.scope_exists(scope) {
             return Vec::new();
         }
 
         let prefix = format!("{}::", scope);
-        let mut members = BTreeSet::new();
-        for spelling in self.source_names.keys() {
+        let mut members: BTreeMap<String, ScopeMemberKind> = BTreeMap::new();
+        for (spelling, key) in &self.source_names {
             if let Some(rest) = spelling.strip_prefix(&prefix) {
                 if !rest.contains("::") {
-                    members.insert(rest.to_string());
+                    members
+                        .entry(rest.to_string())
+                        .or_insert_with(|| self.declared_member_kind(key));
                 }
             }
         }
@@ -1048,7 +1088,9 @@ impl TypeIndex {
                 };
                 if let Some(rest) = spelling.strip_prefix(&prefix) {
                     if !rest.contains("::") {
-                        members.insert(rest.to_string());
+                        members
+                            .entry(rest.to_string())
+                            .or_insert(ScopeMemberKind::Function);
                     }
                 }
             }
@@ -1056,11 +1098,30 @@ impl TypeIndex {
         for nested in &self.scopes {
             if let Some(rest) = nested.strip_prefix(&prefix) {
                 if !rest.contains("::") {
-                    members.insert(rest.to_string());
+                    members
+                        .entry(rest.to_string())
+                        .or_insert(ScopeMemberKind::Namespace);
                 }
             }
         }
         members.into_iter().collect()
+    }
+
+    /// Which of the three declaration tables `key` — a value from
+    /// [`Self::source_names`] — lives in.
+    ///
+    /// `Class` is the fall-through rather than an `Option`, because
+    /// `source_names` is built from exactly these three maps: a key that is
+    /// in none of them cannot exist, and returning `None` would push a
+    /// choice onto every caller for a case that cannot happen.
+    fn declared_member_kind(&self, key: &str) -> ScopeMemberKind {
+        if self.enums.contains_key(key) {
+            ScopeMemberKind::Enum
+        } else if self.funcdefs.contains_key(key) {
+            ScopeMemberKind::Funcdef
+        } else {
+            ScopeMemberKind::Class
+        }
     }
 
     /// The fully qualified enum key `qualified` is a genuine trailing PATH
