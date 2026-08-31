@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T18:08:02Z"
 depends_on: []
 estimate_hours: 4
 id: B170
 priority: medium
+started_at: null
 status: pending
 tags: []
 title: 'VS Code: contextual quick actions on #if defines to enable or disable branches'
@@ -64,3 +66,5 @@ Integration proof:
 ## Related
 
 B031 (inactive-region diagnostics), B034 (VS Code defines UI and pure edit helpers), B050 (resolved define introspection), server `src/server/diagnostics.rs` and `src/server/code_actions/`, extension `packages/vscode-ext/src/defines.ts` and `definesCommands.ts`.
+
+Decision 2026-09-01: independent cross-repo lane using one server worktree and one ../lsp-openplanet-ext worktree. Server emits contextual command actions from preprocessor structure; extension owns settings mutation and reuses applyDefineEdit/resolved-state/scope safeguards. Compound expressions get literal per-symbol actions only, never an unproven activate-branch label.
