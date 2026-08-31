@@ -1176,14 +1176,29 @@ impl<'a> GlobalScope<'a> {
     }
 
     /// B130: the trailing-`const` qualifier of an ENGINE method, from the
-    /// typedb. `None` when no such method is known, when the type is not an
-    /// external type at all, or when a workspace class shadows the name —
-    /// the same provenance discipline `workspace_own_method_is_const` applies
-    /// to the other half of the merged view.
+    /// typedb. `None` means "we do not know", and that covers four distinct
+    /// situations which all want the same answer from a caller — decline:
+    ///
+    /// * no such method is known,
+    /// * the type is not an external type at all,
+    /// * a workspace class shadows the name (same provenance discipline
+    ///   `workspace_own_method_is_const` applies to the other half of the
+    ///   merged view),
+    /// * or the DATABASE itself does not say — every Nadeo method (B137).
     ///
     /// The data reaching here is B125's: `CoreMethod::declared_const` reads
     /// the trailing ` const` off the `decl` string, which is the only place
-    /// the dumps carry it. 301 of 1002 Core class methods have one.
+    /// the dumps carry it. 301 of 1002 Core class methods have one. The Nadeo
+    /// dump carries no signature text at all, measured, so its methods arrive
+    /// as `None`.
+    ///
+    /// B137 note on how that exclusion is made: this used to check the type's
+    /// `TypeSource` and refuse anything not Core. That was a PROXY — right
+    /// answer, wrong reason — and it would have gone quietly wrong the moment
+    /// a Core-sourced method arrived without constness, or a Nadeo one with
+    /// it. `MethodInfo::is_const` is now `Option<bool>`, so the datum states
+    /// its own absence and this reads the fact instead of guessing from
+    /// provenance.
     ///
     /// `Some(true)` when ANY overload of the name is const, matching
     /// `workspace_own_method_is_const` — on a const receiver the engine
@@ -1210,37 +1225,41 @@ impl<'a> GlobalScope<'a> {
                 break;
             }
             let info = ext.lookup_type(&name)?;
+            // B137: three-valued, aggregated over the overload set.
+            //
+            //   any `Some(true)`  -> `Some(true)`  a const overload exists, so
+            //                       the engine selects it and the call is legal
+            //   else any `None`   -> `None`        at least one overload's
+            //                       constness is unknown, so a const one cannot
+            //                       be ruled out; decline rather than guess
+            //   else              -> `Some(false)` every overload is known
+            //                       non-const
+            //
+            // The `None` arm is what keeps every Nadeo method out. It reads the
+            // DATA's own "I don't know" instead of inferring it from the type's
+            // source, which is what this did before — a provenance proxy that
+            // happened to line up, rather than the fact itself.
             let mut found = false;
             let mut any_const = false;
+            let mut any_unknown = false;
             for m in &info.methods {
                 if m.name == method || m.name == getter || m.name == setter {
                     found = true;
-                    any_const |= m.is_const;
+                    match m.is_const {
+                        Some(true) => any_const = true,
+                        Some(false) => {}
+                        None => any_unknown = true,
+                    }
                 }
             }
             if found {
-                // ONLY Core carries real constness. The Nadeo loader
-                // hardcodes `is_const: false` on every method it builds,
-                // because that dump "stores no declaration text" — so there
-                // `false` means UNKNOWN, not non-const, and reading it as an
-                // answer would fire on every Nadeo method reached through a
-                // const receiver.
-                //
-                // That is the same `bool`-defaults-to-a-lie defect B125 and
-                // B131 fixed on the Core side, surviving in the other half of
-                // the loader. The fleet cannot catch it: all 807 engine
-                // receiver sites across 152 plugins are Core types
-                // (`string`, `Json::Value`, `Reflection::MwClassInfo`,
-                // `vec3`, ...), so the Nadeo population has ZERO exposure
-                // there and a zero measured on it would mean nothing.
-                //
-                // Giving Nadeo a real answer means parsing constness out of
-                // its signature text — a separate ticket with its own
-                // measurement, not something to infer here.
-                if info.source != crate::typedb::index::TypeSource::Core {
+                if any_const {
+                    return Some(true);
+                }
+                if any_unknown {
                     return None;
                 }
-                return Some(any_const);
+                return Some(false);
             }
             current = info
                 .parent

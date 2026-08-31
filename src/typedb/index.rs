@@ -127,7 +127,26 @@ pub struct MethodInfo {
     pub name: String,
     pub return_type: String,
     pub params: Vec<ParamInfo>,
-    pub is_const: bool,
+    /// B137: the trailing `const` qualifier — `None` when the source database
+    /// does not say, which is a THIRD state and not a synonym for `false`.
+    ///
+    /// It was a `bool`, and on the Nadeo half it was hardcoded `false` for
+    /// every one of 3084 methods, so `false` meant "we never knew". That is
+    /// the same `bool`-defaults-to-a-lie defect B125 and B131 removed on the
+    /// Core side, and it nearly shipped a false positive on every
+    /// correctly-written const Nadeo call when B130 started consuming this.
+    ///
+    /// * `Some(true)`  — the database says const. Core only, from the `decl`
+    ///   suffix (B125).
+    /// * `Some(false)` — the database says NOT const. Core only.
+    /// * `None`        — unknown. Every Nadeo method, measured: the dump has
+    ///   no `decl` key at all and no signature text anywhere. See the Nadeo
+    ///   loader for that measurement.
+    ///
+    /// A consumer that cannot act on `None` must decline rather than coerce
+    /// it — `GlobalScope::external_method_is_const` returns it verbatim so
+    /// the const-receiver rule stays silent on unknowns.
+    pub is_const: Option<bool>,
     /// Declaration text as stored by the database — see [`FunctionInfo::decl`].
     pub decl: Option<String>,
     pub doc: Option<String>,
@@ -1232,8 +1251,9 @@ impl TypeIndex {
                             })
                             .collect(),
                         // B125: derived from `decl`, not from a `const`
-                        // key — the dumps do not carry one.
-                        is_const: m.declared_const(),
+                        // key — the dumps do not carry one. B137: `Some`,
+                        // because Core genuinely knows the answer.
+                        is_const: Some(m.declared_const()),
                         decl: m.decl.clone(),
                         doc: m.desc.clone(),
                     })
@@ -1385,13 +1405,51 @@ impl TypeIndex {
                                         is_in: false,
                                         is_out: false,
                                         is_inout: false,
-                                        // The Nadeo dump carries `const` in
-                                        // the signature text, not in flags.
+                                        // B137: this comment used to say the
+                                        // Nadeo dump "carries `const` in the
+                                        // signature text, not in flags". That
+                                        // is measurably false — 0 of the 1387
+                                        // Nadeo arg strings contain `const`,
+                                        // and the whole file holds just 5
+                                        // occurrences of the substring, all
+                                        // inside description prose. There is
+                                        // no signature text to read it from.
+                                        //
+                                        // So this `false` is the same
+                                        // not-a-measurement that
+                                        // `MethodInfo::is_const` carried until
+                                        // this ticket. It is left as a `bool`
+                                        // only because its blast radius is one
+                                        // reader (`hover.rs`, which prefixes
+                                        // `const` on a rendered parameter) and
+                                        // widening the type is its own change
+                                        // with its own consumer to re-check —
+                                        // see the follow-up ticket. Core sets
+                                        // this from real `typeflags` data.
                                         is_const: false,
                                     })
                                     .collect(),
-                                is_const: false,
-                                // The Nadeo dump stores no declaration text.
+                                // B137: UNKNOWN, not `false`. Measured across
+                                // the 1.29.5 fixture and an installed
+                                // 1.29.14, both 2585 types / 16321 members:
+                                // the dump has NO `decl` key (0 occurrences)
+                                // and no signature text — the only 5
+                                // occurrences of "const" in the whole file
+                                // are inside description prose
+                                // ("constrained", "constant", "constraint").
+                                // The `c` field is not it either: it varies
+                                // independently of `m` across all four
+                                // combinations and sits on just 4 of 3084
+                                // methods.
+                                //
+                                // So there is nothing to parse, and the
+                                // honest representation of that is `None`.
+                                // It used to be `false`, which asserted
+                                // "not const" about 3084 methods nobody had
+                                // ever asked.
+                                is_const: None,
+                                // The Nadeo dump stores no declaration text
+                                // — measured above, not inherited.
                                 decl: None,
                                 doc: None,
                             });
@@ -2161,7 +2219,14 @@ fn class_facts(info: &TypeInfo) -> BTreeSet<String> {
             method.name,
             render_params(&method.params),
             render_return(&method.return_type),
-            if method.is_const { " const" } else { "" }
+            // B137: three states, rendered distinctly. Folding `None` in
+            // with `Some(false)` would reintroduce in the drift report the
+            // exact conflation this ticket removed from the loader.
+            match method.is_const {
+                Some(true) => " const",
+                Some(false) => "",
+                None => " const:unknown",
+            }
         ));
     }
     for prop in &info.properties {
@@ -5600,7 +5665,12 @@ mod b125_engine_method_constness_tests {
                 .iter()
                 .find(|m| m.name == name)
                 .unwrap_or_else(|| panic!("string::{name} must exist"));
-            assert_eq!(m.is_const, want, "string::{name} decl={:?}", m.decl);
+            assert_eq!(
+                m.is_const,
+                Some(want),
+                "Core knows the answer, so it must be `Some`: string::{name} decl={:?}",
+                m.decl
+            );
         }
         // Non-vacuity: the index must not simply say `true` everywhere.
         let any_false = idx
@@ -5608,7 +5678,7 @@ mod b125_engine_method_constness_tests {
             .expect("string")
             .methods
             .iter()
-            .any(|m| !m.is_const);
+            .any(|m| m.is_const == Some(false));
         assert!(
             any_false,
             "every `string` method reported const — the flag is not discriminating"
@@ -5667,6 +5737,126 @@ mod b125_drift_visibility_tests {
         assert!(
             diff_indexes(&old, &new).is_empty(),
             "identical DBs must diff clean"
+        );
+    }
+}
+
+// ── B137: constness the database does not state is `None`, not `false` ──────
+//
+// The Nadeo loader built every `MethodInfo` with `is_const: false`. That was
+// not a measurement — the dump says nothing — so `false` asserted "not const"
+// about 3084 methods nobody had ever asked. Same `bool`-defaults-to-a-lie
+// shape as B125's dead `is_const` key and B131's `is_protected`, surviving in
+// the loader's other half, and it went unnoticed until B130 started CONSUMING
+// the field and a B116 test went red.
+#[cfg(test)]
+mod b137_nadeo_constness_is_unknown {
+    use super::*;
+
+    fn fixtures() -> TypeIndex {
+        let base =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+        TypeIndex::load(
+            &base.join("OpenplanetCore.json"),
+            &base.join("OpenplanetNext.json"),
+        )
+        .expect("fixtures must load")
+    }
+
+    /// THE INVARIANT. Core knows; Nadeo does not; nothing is allowed to
+    /// pretend otherwise. Stated over every method in the shipped dumps
+    /// rather than a sample, so a loader that starts hardcoding a value again
+    /// fails here.
+    #[test]
+    fn core_methods_state_their_constness_and_nadeo_methods_do_not() {
+        let idx = fixtures();
+        let mut core_known = 0usize;
+        let mut nadeo_unknown = 0usize;
+        for info in idx.types.values() {
+            for m in &info.methods {
+                match info.source {
+                    TypeSource::Core => {
+                        assert!(
+                            m.is_const.is_some(),
+                            "Core reads constness off the `decl` suffix, so it must \
+                             always have an answer: {}::{} decl={:?}",
+                            info.name,
+                            m.name,
+                            m.decl
+                        );
+                        core_known += 1;
+                    }
+                    _ => {
+                        assert_eq!(
+                            m.is_const, None,
+                            "the Nadeo dump carries no signature text, so its \
+                             constness must be UNKNOWN rather than `false`: {}::{}",
+                            info.name, m.name
+                        );
+                        nadeo_unknown += 1;
+                    }
+                }
+            }
+        }
+        // Non-vacuity: both populations must be non-empty, or the assertions
+        // above are being made about nothing.
+        assert!(core_known > 900, "only {core_known} Core methods audited");
+        assert!(
+            nadeo_unknown > 3000,
+            "only {nadeo_unknown} Nadeo methods audited"
+        );
+    }
+
+    /// The measurement behind the `None`, pinned so nobody re-derives it and
+    /// nobody "fixes" the loader by inventing a parse. Measured identically on
+    /// the 1.29.5 fixture and an installed 1.29.14 (both 2585 types / 16321
+    /// members): no `decl` key anywhere, and the only occurrences of "const"
+    /// in the entire file are inside description prose.
+    #[test]
+    fn the_nadeo_dump_carries_no_signature_text_at_all() {
+        let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetNext.json");
+        let raw = std::fs::read_to_string(&p).expect("fixture must exist");
+        assert_eq!(
+            raw.matches("\"decl\"").count(),
+            0,
+            "the Nadeo dump grew a `decl` key — constness may now be parseable \
+             the way Core's is (B125); re-measure before leaving this `None`"
+        );
+        // "constrained" / "constant" / "constraint", all inside `d` prose.
+        assert_eq!(
+            raw.matches("const").count(),
+            5,
+            "the count of `const` substrings changed; if any is now a signature \
+             qualifier rather than description prose, this ticket reopens"
+        );
+    }
+
+    /// The drift report keeps all THREE states distinct. Folding `None` in
+    /// with `Some(false)` would reintroduce in the report the exact
+    /// conflation the loader change removed.
+    #[test]
+    fn class_facts_renders_unknown_distinctly_from_non_const() {
+        let idx = fixtures();
+        let core = idx
+            .lookup_type("string")
+            .expect("`string` is a Core type in the fixtures");
+        let facts = super::class_facts(core);
+        assert!(
+            facts.iter().any(|f| f.ends_with(" const")),
+            "a Core const method must render its qualifier: {facts:?}"
+        );
+        assert!(
+            !facts.iter().any(|f| f.contains("const:unknown")),
+            "Core never renders unknown: {facts:?}"
+        );
+        let nadeo = idx
+            .lookup_type("Game::CGameCtnBlock")
+            .expect("`Game::CGameCtnBlock` is a Nadeo type in the fixtures");
+        let nfacts = super::class_facts(nadeo);
+        assert!(
+            nfacts.iter().any(|f| f.contains("const:unknown")),
+            "a Nadeo method's constness is unknown and must say so: {nfacts:?}"
         );
     }
 }
