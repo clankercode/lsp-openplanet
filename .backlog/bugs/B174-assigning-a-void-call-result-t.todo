@@ -1,0 +1,44 @@
+---
+complexity: medium
+created_at: "2026-09-02T06:00:37Z"
+depends_on: []
+estimate_hours: 1
+id: B174
+priority: high
+status: pending
+tags:
+    - typecheck
+    - false-negative
+title: Assigning a void call result to a typed variable is not flagged
+updated_at: "2026-09-02T06:00:37Z"
+---
+## Goal
+Flag using a `void` call as a value (`uint64 x = VoidFn();`, or any non-void context).
+
+## Source
+tm-editor-plus-plus `src/Components/ItemEditor/IE_GmSurf.as` (2026-09-02). Game compile failed; `openplanet-lsp check` reported 0 errors (24 unrelated warnings).
+
+## Repro
+```angelscript
+void Dev_FindPatternCached(const string &in pat) {}
+void Use() {
+    uint64 fn = Dev_FindPatternCached("48 85 C0");
+}
+```
+
+## Compiler (game-side)
+```
+Components/ItemEditor/IE_GmSurf.as (316, 21) :  ERR : Data type can't be 'void'
+```
+
+## LSP today
+Silent. `openplanet-lsp check` on the full E++ tree accepted the call site.
+
+## Acceptance
+- [ ] `T x = VoidFn();` is an error for any non-void T
+- [ ] passing a void call as an argument is an error
+- [ ] `VoidFn();` as a statement stays silent
+- [ ] Regression fixture
+
+## Notes
+Sibling of the definition-site miss: the callee was declared `void` but contained `return PatternCache::Get(pat);` (`Can't return value when return type is 'void'`). Two sites, two engine messages.

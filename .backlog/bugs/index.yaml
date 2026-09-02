@@ -172,3 +172,4 @@ bugs:
     - file: B171-master-is-red-b160-s-universal.todo
     - file: B172-return-value-from-void-functio.todo
     - file: B173-dictionaryvalue-has-no-implici.todo
+    - file: B174-assigning-a-void-call-result-t.todo
