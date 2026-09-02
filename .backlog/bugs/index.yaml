@@ -175,3 +175,4 @@ bugs:
     - file: B174-assigning-a-void-call-result-t.todo
     - file: B175-duplicate-global-function-same.todo
     - file: B176-call-with-non-convertible-hand.todo
+    - file: B177-openplanet-lsp-accepts-primiti.todo
