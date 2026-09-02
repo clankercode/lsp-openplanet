@@ -1,0 +1,44 @@
+---
+complexity: medium
+created_at: "2026-09-02T06:00:32Z"
+depends_on: []
+estimate_hours: 1
+id: B172
+priority: high
+status: pending
+tags:
+    - typecheck
+    - false-negative
+title: Return value from void function is not flagged
+updated_at: "2026-09-02T06:00:32Z"
+---
+## Goal
+Flag `return <expr>;` when the enclosing function's return type is `void`.
+
+## Source
+tm-editor-plus-plus `src/Dev/FindPatternCached.as` (2026-09-02). Game compile failed; `openplanet-lsp check` reported 0 errors (24 unrelated warnings).
+
+## Repro
+```angelscript
+uint64 Helper() { return 1; }
+void Dev_FindPatternCached(const string &in pat) {
+    return Helper();
+}
+```
+
+## Compiler (game-side)
+```
+Dev/FindPatternCached.as (21, 5) :  ERR : Can't return value when return type is 'void'
+```
+
+## LSP today
+Silent. `openplanet-lsp check` on the full E++ tree accepted the file.
+
+## Acceptance
+- [ ] `return expr;` inside `void f()` is an error
+- [ ] bare `return;` inside `void f()` stays silent
+- [ ] `return expr;` whose type matches a non-void return type stays silent
+- [ ] Regression fixture
+
+## Notes
+Sibling of the call-site miss: assigning that void call to a typed local (`uint64 fn = Dev_FindPatternCached(pat)`) is a separate game error (`Data type can't be 'void'`).

@@ -170,3 +170,4 @@ bugs:
     - file: B169-rebase-head-is-not-an-unresolv.todo
     - file: B170-vs-code-contextual-quick-actio.todo
     - file: B171-master-is-red-b160-s-universal.todo
+    - file: B172-return-value-from-void-functio.todo
