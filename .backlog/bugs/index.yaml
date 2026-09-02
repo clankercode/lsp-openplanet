@@ -173,3 +173,4 @@ bugs:
     - file: B172-return-value-from-void-functio.todo
     - file: B173-dictionaryvalue-has-no-implici.todo
     - file: B174-assigning-a-void-call-result-t.todo
+    - file: B175-duplicate-global-function-same.todo

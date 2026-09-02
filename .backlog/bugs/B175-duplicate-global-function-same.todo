@@ -1,0 +1,49 @@
+---
+complexity: medium
+created_at: "2026-09-02T18:14:53Z"
+depends_on: []
+estimate_hours: 1
+id: B175
+priority: high
+status: pending
+tags:
+    - typecheck
+    - false-negative
+title: Duplicate global function (same name + params) across files is not flagged
+updated_at: "2026-09-02T18:14:53Z"
+---
+## Goal
+Flag a global function declared twice with the same name and parameter list within one plugin module, even when the two declarations live in different files.
+
+## Source
+tm-dips-plus-plus (2026-09-02). Vendored fallback sources: `src/Dependencies/Dep_SmPlayerVis.as` (generated from tm-sm-player-vis `src/Managers.as`) declares `uint16 GetOffset(const string &in, const string &in)`; `src/from-epp.as:47` declares the identical signature. Game compile failed; `openplanet-lsp check` on the full tree passed the gate with 0 errors (5 unrelated warnings).
+
+## Repro
+```angelscript
+// FileA.as
+uint16 GetOffset(const string &in className, const string &in memberName) { return 0; }
+
+// FileB.as (same plugin)
+uint16 GetOffset(const string &in className, const string &in memberName) { return 0xFFFF; }
+```
+
+## Compiler (game-side)
+```
+from-epp.as (47, 1) :  ERR : A function with the same name and parameters already exists
+Script compilation failed!
+```
+(The second declaration is the one blamed.)
+
+## LSP today
+Silent. Both files are compiled in the same module pass; no diagnostic is produced for either declaration.
+
+## Acceptance
+- [ ] Same name + same parameter list, two files, one plugin → error on the second declaration
+- [ ] Same name + same parameter list within one file → error (same rule, likely same path)
+- [ ] Same name with a genuinely different parameter list stays silent (legal overload)
+- [ ] Same name in a different namespace stays silent
+- [ ] Duplicate global *variables*/consts: verify the game rule and match it (not game-verified in this instance)
+- [ ] Regression fixture
+
+## Notes
+Hit while vendoring byte-identical helper functions from two plugin repos into one host plugin (`Managers.as` in tm-char-vis and tm-sm-player-vis share `GetOffset`, `GetClassId`, `FindMgrIndex`, `GetManager`, `GetManagerPtr`). Any "bundle a copy of another plugin's sources" pattern will trip this class, and the LSP gate gives false confidence because the failure only surfaces in Openplanet.log.
