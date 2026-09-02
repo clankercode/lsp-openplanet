@@ -174,3 +174,4 @@ bugs:
     - file: B173-dictionaryvalue-has-no-implici.todo
     - file: B174-assigning-a-void-call-result-t.todo
     - file: B175-duplicate-global-function-same.todo
+    - file: B176-call-with-non-convertible-hand.todo

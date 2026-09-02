@@ -1,0 +1,65 @@
+---
+complexity: medium
+created_at: "2026-09-02T18:14:58Z"
+depends_on: []
+estimate_hours: 2
+id: B176
+priority: high
+status: pending
+tags:
+    - typecheck
+    - false-negative
+title: Call with non-convertible handle argument is not flagged (no matching signatures)
+updated_at: "2026-09-02T18:14:58Z"
+---
+## Goal
+Flag a call whose argument types match no overload of the callee — specifically handle arguments whose class/interface does not implicitly convert to any candidate parameter type.
+
+## Source
+tm-dips-plus-plus `src/Minigames/HeadPose.as` (2026-09-03). Two instances in one compile; both silent under `openplanet-lsp check` (gate passed, 0 errors), both hard errors in-game. Both the callee and the call site are plugin-local declarations — no dependency injection involved.
+
+Instance 1: `uint Count(NSmPlayerVis_SMgr@ mgr)`-style helper called with an interface handle:
+```angelscript
+// declared: uint SmPlayerVis::PlayersLength(NSmPlayerVis_SMgr@ mgr)
+auto smMgr = SmPlayerVis::GetMgr(app.GameScene); // SmPlayerVis::ISmPlayerVisMgr@
+uint n = SmPlayerVis::PlayersLength(smMgr);      // ICounter@ -> RawMgr@ does not convert
+```
+
+Instance 2: parameter is `CMwNod@`, argument is a game class that is not a nod:
+```angelscript
+// declared: uint64 Kinematic::NodPtr(CMwNod@ nod)
+uint64 visPtr = Kinematic::NodPtr(vis); // vis is CSceneCharVis@ (not a CMwNod subclass)
+```
+
+## Repro
+```angelscript
+interface ICounter { uint get_Count() const; }
+class RawCounter { }
+
+uint Count(RawCounter@ c) { return 0; }
+
+void Repro(ICounter@ ic) {
+    Count(ic); // no implicit ICounter@ -> RawCounter@ conversion exists
+}
+```
+
+## Compiler (game-side)
+```
+Minigames/HeadPose.as (117, 18) :  ERR : No matching signatures to 'SmPlayerVis::PlayersLength(SmPlayerVis::ISmPlayerVisMgr@&)'
+Minigames/HeadPose.as (158, 25) :  ERR : No matching signatures to 'Kinematic::NodPtr(CSceneCharVis@&)'
+Script compilation failed!
+```
+
+## LSP today
+Silent on both call sites. The symbols themselves resolve (both are used elsewhere in the same tree without complaint), so this is the call-vs-signature compatibility check that is missing, not name resolution.
+
+## Acceptance
+- [ ] Argument handle type that converts to no overload parameter → error naming the callee and the argument type (match the game's `No matching signatures to 'F(T@&)'` shape)
+- [ ] Upcast to a base/interface parameter stays silent
+- [ ] Explicit `cast<To>(arg)` at the call site stays silent
+- [ ] Primitive mismatches with no implicit conversion (e.g. `int` arg to `string` param) — verify parity with the game and match it
+- [ ] Error position points at the argument expression, not the callee
+- [ ] Regression fixture
+
+## Notes
+Cascading effect to consider: once the call fails, AngelScript reports every later use of the would-be-initialized local as `No matching symbol` — we only need the primary diagnostic. This class hid behind `#if DEPENDENCY_X && DEPENDENCY_Y` guards in the source plugin for weeks because the guarded state never occurred in dev; the LSP never type-checked that code until the guards were removed.
