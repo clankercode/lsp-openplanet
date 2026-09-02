@@ -171,3 +171,4 @@ bugs:
     - file: B170-vs-code-contextual-quick-actio.todo
     - file: B171-master-is-red-b160-s-universal.todo
     - file: B172-return-value-from-void-functio.todo
+    - file: B173-dictionaryvalue-has-no-implici.todo

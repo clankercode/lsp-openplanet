@@ -1,0 +1,50 @@
+---
+complexity: medium
+created_at: "2026-09-02T06:00:34Z"
+depends_on: []
+estimate_hours: 1
+id: B173
+priority: high
+status: pending
+tags:
+    - typecheck
+    - false-negative
+title: dictionaryValue has no implicit conversion to uint64
+updated_at: "2026-09-02T06:00:34Z"
+---
+## Goal
+Flag implicit conversion from `dictionaryValue` to `uint64`. Game typedb exposes `int64 opConv()` and `double opConv()` only — not `uint64`.
+
+## Source
+tm-editor-plus-plus `src/Dev/FindPatternCached.as` (2026-09-02). Game compile failed; `openplanet-lsp check` reported 0 errors (24 unrelated warnings).
+
+## Repro
+```angelscript
+dictionary _cache;
+uint64 Get(const string &in pat) {
+    if (_cache.Exists(pat)) {
+        return _cache[pat];
+    }
+    return 0;
+}
+```
+
+## Compiler (game-side)
+```
+Dev/FindPatternCached.as (6, 13) :  ERR : No conversion from 'dictionaryValue' to 'uint64' available.
+```
+
+## LSP today
+Silent. `openplanet-lsp check` on the full E++ tree accepted the file.
+
+## Workaround
+`_cache.Get(pat, cached)` with a typed out-param (`uint64` via `?&out`, or `int64` via the dedicated overload then cast). Or `uint64(int64(_cache[pat]))` using the existing `int64 opConv()`.
+
+## Acceptance
+- [ ] `uint64 x = dict[key];` / `return dict[key];` where the return type is `uint64` is an error
+- [ ] `int64 x = dict[key];` and `double x = dict[key];` stay silent (`int64`/`double` opConv exist)
+- [ ] `dict.Get(key, uint64_out)` stays silent
+- [ ] Regression fixture
+
+## Notes
+`dictionaryValue` also has `void opConv(?&out)` / `void opCast(?&out)` — those are explicit. The game rejected the implicit `uint64` path only.
