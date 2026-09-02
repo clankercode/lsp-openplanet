@@ -1,13 +1,13 @@
 critical_path:
-    - B109
+    - B176
 description: AngelScript/Openplanet LSP — compiler parity bugs and false positives from real plugin dogfooding
-next_available: null
+next_available: B176
 phases: []
 project: openplanet-lsp
 stats:
     blocked: 0
     done: 170
     in_progress: 0
-    pending: 0
-    total_tasks: 171
+    pending: 6
+    total_tasks: 177
 timeline_weeks: 12
