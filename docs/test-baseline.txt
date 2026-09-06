@@ -1517,6 +1517,8 @@ openplanet_lsp::server::completion::b117_member_visibility_tests::the_file_bound
 openplanet_lsp::server::completion::b133_enum_value_docs::core_enum_completion_documents_one_value_and_leaves_the_common_fallback_plain
 openplanet_lsp::server::completion::b133_enum_value_docs::nadeo_enum_completion_without_value_docs_stays_usable_and_plain
 openplanet_lsp::server::completion::b133_enum_value_docs::shortcut_enum_value_completion_carries_the_same_doc
+openplanet_lsp::server::completion::tests::a_top_level_engine_function_item_carries_its_signature_and_overloads
+openplanet_lsp::server::completion::tests::a_workspace_overload_of_an_engine_function_is_not_offered_twice
 openplanet_lsp::server::completion::tests::completion_namespace_still_works
 openplanet_lsp::server::completion::tests::completion_offers_dot_members
 openplanet_lsp::server::completion::tests::completion_offers_enclosing_class_members
@@ -1527,6 +1529,8 @@ openplanet_lsp::server::completion::tests::completion_preprocessor_directive
 openplanet_lsp::server::completion::tests::core_namespace_remains_an_identifier_completion
 openplanet_lsp::server::completion::tests::every_offered_injected_method_is_one_the_checker_accepts
 openplanet_lsp::server::completion::tests::every_shortcut_label_is_a_spelling_the_checker_accepts
+openplanet_lsp::server::completion::tests::identifier_completion_does_not_offer_namespaced_engine_functions_bare
+openplanet_lsp::server::completion::tests::identifier_completion_offers_top_level_engine_functions
 openplanet_lsp::server::completion::tests::member_completion_does_not_inject_methods_on_a_workspace_type_shadow
 openplanet_lsp::server::completion::tests::member_completion_does_not_leak_an_exact_list_method_to_other_receivers
 openplanet_lsp::server::completion::tests::member_completion_offers_an_injected_method_on_its_exact_receiver
@@ -2935,6 +2939,7 @@ openplanet_lsp::typedb::index::tests::every_namespace_that_owns_functions_is_a_s
 openplanet_lsp::typedb::index::tests::no_two_global_enums_share_a_bare_name_with_different_values
 openplanet_lsp::typedb::index::tests::short_name_buckets_and_resolution_are_sorted_across_loads
 openplanet_lsp::typedb::index::tests::sort_enum_values_breaks_value_ties_by_name
+openplanet_lsp::typedb::index::tests::source_global_functions_are_the_bare_named_ones_in_order
 openplanet_lsp::typedb::index::tests::test_find_by_short_name_editor_free
 openplanet_lsp::typedb::index::tests::test_find_by_short_name_nadeo_class
 openplanet_lsp::typedb::index::tests::test_inline_member_enums_are_registered
