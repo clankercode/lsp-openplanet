@@ -1,16 +1,17 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-09-06T04:12:06Z"
 depends_on: []
 estimate_hours: 2
 id: B179
 priority: medium
+started_at: null
 status: pending
-tags:
-    - completion
-    - editor
-    - typedb
+tags: []
 title: Top-level engine types (vec3, string, dictionary, CoroutineFunc, VirtualKey, Nadeo classes) are never offered at identifier completion
 updated_at: "2026-09-06T04:12:06Z"
 ---
 Sibling of the top-level engine FUNCTION completion gap (filed 2026-09-06). Observed by code reading of src/server/completion.rs complete_identifier: at an identifier position the only engine names offered are namespaces (TypeIndex::source_scopes) and shortcut-namespace members, so 'auto v = vec' never offers vec3, 'dictio' never offers dictionary, 'Coroutine' never offers CoroutineFunc, and a bare Nadeo class name like CGameCtnApp is only reachable if it happens to declare an enum (then it is offered as a MODULE, the wrong kind). Not folded into the function fix because it is a real design question, not a one-liner: source_names carries every Nadeo class including MwFoundations names the game never registers (Bool, Real, Int8 - see spelling_is_source_name / has_type notes), so a naive dump would offer spellings the checker then refuses (the B069 failure shape), and the Nadeo class list is thousands of entries per completion response. Needs: the has_type predicate as the gate, a kind per entry (CLASS/ENUM/INTERFACE/funcdef), and a decision on payload size (prefix filter like shortcuts, or rely on client filtering).
+
+Evidence from the B178 test run (2026-09-06): at an identifier position with the fixture typedb loaded, the source_scopes loop already emits ~300 Nadeo class names (CGameCtnApp, CSmScriptPlayer, mat3, mat4, string) as MODULE items - only the classes that declare an enum, and with the wrong kind - plus nested scopes as QUALIFIED labels (UI::Font, UI::Plot, Internal::NadeoServices, CHmsSolidVisCst_TmCar::SPrestige, NSysCfgVision::SDeferred). A qualified label at an identifier position is not something the user can type there without the prefix, so the nested-scope rows should probably move behind their parent's '::' completion. Whatever fixes the type gap should also decide what source_scopes owes the identifier position: top-level scopes only, with the enum-declaring classes re-kinded as CLASS.
