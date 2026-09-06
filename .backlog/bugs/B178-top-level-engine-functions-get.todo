@@ -1,0 +1,16 @@
+---
+complexity: low
+created_at: "2026-09-06T04:12:06Z"
+depends_on: []
+estimate_hours: 1
+id: B178
+priority: high
+status: pending
+tags:
+    - completion
+    - editor
+    - typedb
+title: Top-level engine functions (getExceptionInfo, print, startnew, sleep) are never offered at identifier completion
+updated_at: "2026-09-06T04:12:06Z"
+---
+Reported by Max 2026-09-06 via the VS Code extension: typing 'auto x = getE' offers nothing, although hover/type inference resolves getExceptionInfo() -> string, so the typedb has it. Root cause (read from src/server/completion.rs complete_identifier): the identifier position offers keywords, locals, enclosing-class members, workspace globals, engine NAMESPACES (TypeIndex::source_scopes) and the configured namespace-shortcut members - but never the engine's top-level free functions. The Core typedb carries 41 such overloads across ~20 names (print, warn, error, trace, sleep, yield, startnew, throw, getExceptionInfo, tostring, await, GetApp, ...). The module doc claims 'external top-level namespaces and functions' are offered; only the namespaces half was ever implemented. Fix: a TypeIndex enumeration of functions whose SOURCE spelling has no '::' (Core keyed bare; Nadeo keys must go through source_name_of), surfaced as FUNCTION items with the same detail/docs/commit-chars shape the shortcut items use. Tests: getExceptionInfo plus the print/sleep/startnew/yield/throw/tostring variants; a namespaced function (UI::Begin) must NOT appear bare.
