@@ -1197,6 +1197,31 @@ impl TypeIndex {
         members.into_iter().collect()
     }
 
+    /// B178: every free function the game resolves by its BARE name — the
+    /// engine's top-level functions (`print`, `sleep`, `startnew`,
+    /// `getExceptionInfo`, ...) with their overload sets, in deterministic
+    /// order. The identifier-position counterpart to [`Self::source_scopes`]:
+    /// that one answers "which namespaces can be written here", this one
+    /// "which functions can be called unqualified".
+    ///
+    /// Selected by SOURCE spelling, not by key shape. A Core function's key is
+    /// its spelling, so the two coincide today; the rule is still routed
+    /// through `source_name_of` so a Nadeo-sourced entry — none exist, see the
+    /// `functions`-is-Core-only fence in the tests — could never leak its
+    /// synthetic module or be mistaken for a namespaced function.
+    pub fn source_global_functions(&self) -> Vec<(String, &[FunctionInfo])> {
+        let mut globals: Vec<(String, &[FunctionInfo])> = self
+            .functions
+            .iter()
+            .filter_map(|(qname, overloads)| {
+                let spelling = Self::source_name_of(qname, overloads.first()?.source)?;
+                (!spelling.contains("::")).then_some((spelling, overloads.as_slice()))
+            })
+            .collect();
+        globals.sort_by(|a, b| a.0.cmp(&b.0));
+        globals
+    }
+
     /// Which of the three declaration tables `key` — a value from
     /// [`Self::source_names`] — lives in.
     ///
@@ -2516,6 +2541,56 @@ mod tests {
 
     fn next_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb/OpenplanetNext.json")
+    }
+
+    /// B178: the engine's top-level free functions, by source spelling, in a
+    /// deterministic order — and nothing that lives under a namespace.
+    #[test]
+    fn source_global_functions_are_the_bare_named_ones_in_order() {
+        let idx = TypeIndex::load(&core_path(), &next_path()).expect("fixtures load");
+        let globals = idx.source_global_functions();
+        let names: Vec<&str> = globals.iter().map(|(n, _)| n.as_str()).collect();
+
+        for expected in [
+            "getExceptionInfo",
+            "print",
+            "sleep",
+            "startnew",
+            "yield",
+            "GetApp",
+        ] {
+            assert!(
+                names.contains(&expected),
+                "`{}` missing from {:?}",
+                expected,
+                names
+            );
+        }
+        assert!(
+            names.iter().all(|n| !n.contains("::")),
+            "a namespaced function leaked: {:?}",
+            names
+        );
+        for namespaced in ["Begin", "Abs", "UI::Begin", "Math::Abs"] {
+            assert!(
+                !names.contains(&namespaced),
+                "`{}` offered: {:?}",
+                namespaced,
+                names
+            );
+        }
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(
+            names, sorted,
+            "order must be deterministic (sorted by name)"
+        );
+        assert!(
+            globals.iter().all(|(_, overloads)| !overloads.is_empty()),
+            "every entry carries at least one overload"
+        );
+        let print = globals.iter().find(|(n, _)| n == "print").expect("print");
+        assert_eq!(print.1.len(), 2, "print has two overloads in the Core dump");
     }
     /// A namespace that owns FREE FUNCTIONS is always a scope, so gating
     /// namespace-shortcut completions on `scope_exists` can never cost a

@@ -13,6 +13,13 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+### Fixed
+- **Top-level engine functions complete at identifier positions** (B178) —
+  `getExceptionInfo`, `print`, `startnew`, `sleep`, `yield`, `throw` and the
+  rest of the engine's bare-named functions had no completion producer at
+  all; only the engine's namespaces were offered, while hover resolved the
+  same calls from the same typedb.
+
 ## [0.7.0] - 2026-09-01
 
 ### Added

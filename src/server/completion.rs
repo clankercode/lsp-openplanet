@@ -671,6 +671,28 @@ fn complete_identifier(
         }
     }
 
+    // B178: the engine's top-level free functions (`print`, `sleep`,
+    // `startnew`, `getExceptionInfo`, ...). Until this loop existed the
+    // module doc above promised "external ... functions" and only the
+    // namespaces half was ever produced, so `auto x = getE` had nothing to
+    // offer while hover resolved the finished call from the same typedb.
+    //
+    // These are ordinary identifiers — no `sortText`, no `filterText` —
+    // because that is what they are in source; only the namespace SHORTCUTS
+    // below need the extra shaping. A workspace declaration of the same
+    // name (a plugin's own `trace` overload, say) is already in `items` and
+    // is not duplicated.
+    if let Some(index) = type_index {
+        let existing: std::collections::HashSet<String> =
+            items.iter().map(|i| i.label.clone()).collect();
+        for (name, overloads) in index.source_global_functions() {
+            if existing.contains(&name) {
+                continue;
+            }
+            items.push(engine_function_item(name, overloads));
+        }
+    }
+
     // Namespace-shortcut completions (old vscode-openplanet-angelscript
     // parity): functions (and optionally enums/enum-values) from a small
     // configured set of namespaces appear at identifier positions, labelled
@@ -735,23 +757,9 @@ fn add_shortcut_completions(
                 continue;
             }
             items.push(CompletionItem {
-                label: qname.clone(),
-                kind: Some(CompletionItemKind::FUNCTION),
                 filter_text: Some(short.to_string()),
                 sort_text: Some(SHORTCUT_SORT_TEXT.to_string()),
-                detail: Some(shortcut_detail(&overloads[0])),
-                label_details: Some(CompletionItemLabelDetails {
-                    detail: Some(if overloads[0].params.is_empty() {
-                        "()".to_string()
-                    } else {
-                        "(…)".to_string()
-                    }),
-                    description: Some(overloads[0].return_type.clone()),
-                }),
-                documentation: shortcut_documentation(overloads),
-                // `(` commits a function item — natural next keystroke.
-                commit_characters: Some(vec!["(".to_string()]),
-                ..Default::default()
+                ..engine_function_item(qname.clone(), overloads)
             });
         }
 
@@ -822,9 +830,41 @@ fn add_shortcut_completions(
     }
 }
 
-/// Compact signature for the shortcut item's `detail` (e.g.
+/// One FUNCTION item for an engine overload set, labelled `label`: the
+/// first overload's signature as `detail`, its arity and return type as the
+/// label details, every overload (plus the typedb doc) as documentation,
+/// and `(` as the commit character — the natural next keystroke.
+///
+/// Shared by the top-level engine functions (B178) and the namespace
+/// shortcuts, which layer their own `filterText`/`sortText` on top, so the
+/// editor's detail column and doc popup read the same for `print` as for
+/// `UI::Text`.
+fn engine_function_item(
+    label: String,
+    overloads: &[crate::typedb::index::FunctionInfo],
+) -> CompletionItem {
+    let first = &overloads[0];
+    CompletionItem {
+        label,
+        kind: Some(CompletionItemKind::FUNCTION),
+        detail: Some(function_detail(first)),
+        label_details: Some(CompletionItemLabelDetails {
+            detail: Some(if first.params.is_empty() {
+                "()".to_string()
+            } else {
+                "(…)".to_string()
+            }),
+            description: Some(first.return_type.clone()),
+        }),
+        documentation: function_documentation(overloads),
+        commit_characters: Some(vec!["(".to_string()]),
+        ..Default::default()
+    }
+}
+
+/// Compact signature for a function item's `detail` (e.g.
 /// `bool Begin(string title, bool&out open)`).
-fn shortcut_detail(f: &crate::typedb::index::FunctionInfo) -> String {
+fn function_detail(f: &crate::typedb::index::FunctionInfo) -> String {
     let params = f
         .params
         .iter()
@@ -847,10 +887,10 @@ fn shortcut_detail(f: &crate::typedb::index::FunctionInfo) -> String {
     format!("{} {}({})", f.return_type, f.name, params)
 }
 
-/// Markdown doc for a shortcut function item: first overload's typedb
-/// description plus all overload signatures. `None` when there is no doc
-/// and only one overload (detail already shows its signature).
-fn shortcut_documentation(
+/// Markdown doc for a function item: first overload's typedb description
+/// plus all overload signatures. `None` when there is no doc and only one
+/// overload (detail already shows its signature).
+fn function_documentation(
     overloads: &[crate::typedb::index::FunctionInfo],
 ) -> Option<Documentation> {
     let doc = overloads.iter().find_map(|f| f.doc.clone());
@@ -864,7 +904,7 @@ fn shortcut_documentation(
     }
     md.push_str("```angelscript\n");
     for f in overloads {
-        md.push_str(&shortcut_detail(f));
+        md.push_str(&function_detail(f));
         md.push('\n');
     }
     md.push_str("```");
@@ -981,6 +1021,166 @@ mod tests {
         );
         let labels = labels(&items);
         assert!(labels.contains(&"greet"), "missing greet in {:?}", labels);
+    }
+
+    /// B178: the identifier position offered every engine NAMESPACE
+    /// (`source_scopes`) and the configured shortcut members, but never the
+    /// engine's own top-level free functions — so `auto x = getE` offered
+    /// nothing, while hover on the finished call resolved
+    /// `getExceptionInfo() -> string` from the same typedb. One feature
+    /// knowing what the other refuses to mention.
+    #[test]
+    fn identifier_completion_offers_top_level_engine_functions() {
+        let idx = index_with_anonymous_member_enums();
+        for name in [
+            "getExceptionInfo",
+            "print",
+            "warn",
+            "error",
+            "trace",
+            "sleep",
+            "yield",
+            "startnew",
+            "throw",
+            "tostring",
+            "await",
+            "GetApp",
+        ] {
+            let typed = &name[..3];
+            let src = format!("void f() {{ auto x = {} }}", typed);
+            let marker = format!("= {}", typed);
+            let items = complete_with_shortcuts(&src, &marker, &idx, &[], false);
+            let item = items.iter().find(|i| i.label == name).unwrap_or_else(|| {
+                panic!(
+                    "`{}` missing after typing `{}`: {:?}",
+                    name,
+                    typed,
+                    labels(&items)
+                )
+            });
+            assert_eq!(
+                item.kind,
+                Some(CompletionItemKind::FUNCTION),
+                "`{}` must be a FUNCTION item",
+                name
+            );
+            // An ordinary identifier, not a shortcut: the client sorts and
+            // filters it by its label like any workspace function.
+            assert_eq!(
+                item.sort_text, None,
+                "`{}` must sort as an ordinary item",
+                name
+            );
+            assert_eq!(
+                item.filter_text, None,
+                "`{}` must filter by its label",
+                name
+            );
+        }
+    }
+
+    /// The gate is the SOURCE spelling having no `::`. A namespaced engine
+    /// function (`UI::Begin`, `Math::Abs`) is reachable after `UI::` and, when
+    /// configured, as a shortcut — never as a bare name the game would reject.
+    #[test]
+    fn identifier_completion_does_not_offer_namespaced_engine_functions_bare() {
+        let idx = index_with_anonymous_member_enums();
+        let items = complete_with_shortcuts("void f() { auto x = Beg }", "= Beg", &idx, &[], false);
+        let labels = labels(&items);
+        for bare in ["Begin", "Abs"] {
+            assert!(
+                !labels.contains(&bare),
+                "namespaced `{}` leaked as a bare identifier: {:?}",
+                bare,
+                labels
+            );
+        }
+        // `Text` is BOTH a Core namespace (offered, as a MODULE) and the
+        // function `UI::Text`. The namespace is right; a bare FUNCTION row
+        // would be the leak.
+        assert!(
+            !items
+                .iter()
+                .any(|i| i.label == "Text" && i.kind == Some(CompletionItemKind::FUNCTION)),
+            "`UI::Text` leaked as a bare function"
+        );
+        // No shortcut namespaces configured, so no qualified FUNCTION items
+        // either. (Nested scopes such as `UI::Font` are offered as MODULE
+        // items by the `source_scopes` loop regardless; see B179.)
+        assert!(
+            !items.iter().any(|i| {
+                i.label.starts_with("UI::") && i.kind == Some(CompletionItemKind::FUNCTION)
+            }),
+            "shortcut items offered with no shortcut namespaces configured: {:?}",
+            labels
+        );
+    }
+
+    /// The item carries the same signature/overload shape the shortcut items
+    /// do, so the editor's detail column and doc popup read the same for
+    /// `print` as for `UI::Text`.
+    #[test]
+    fn a_top_level_engine_function_item_carries_its_signature_and_overloads() {
+        let idx = index_with_anonymous_member_enums();
+        let items = complete_with_shortcuts("void f() { getE }", "getE", &idx, &[], false);
+        let find = |label: &str| {
+            items
+                .iter()
+                .find(|i| i.label == label)
+                .unwrap_or_else(|| panic!("`{}` missing: {:?}", label, labels(&items)))
+        };
+
+        let info = find("getExceptionInfo");
+        assert_eq!(info.detail.as_deref(), Some("string getExceptionInfo()"));
+        assert_eq!(
+            info.label_details
+                .as_ref()
+                .and_then(|d| d.description.as_deref()),
+            Some("string")
+        );
+        assert_eq!(info.commit_characters, Some(vec!["(".to_string()]));
+
+        // `print` has two overloads in the Core dump; both signatures reach
+        // the documentation.
+        let print = find("print");
+        match &print.documentation {
+            Some(Documentation::MarkupContent(md)) => assert_eq!(
+                md.value.matches("void print(").count(),
+                2,
+                "both `print` overloads must be documented: {}",
+                md.value
+            ),
+            other => panic!("`print` must carry markdown docs, got {:?}", other),
+        }
+    }
+
+    /// A plugin may add its own overload of an engine name (`trace` with a
+    /// level, say). The workspace item is already offered; the engine entry
+    /// must not produce a second `trace` row.
+    #[test]
+    fn a_workspace_overload_of_an_engine_function_is_not_offered_twice() {
+        let idx = index_with_anonymous_member_enums();
+        let src = "void trace(const string &in msg, int level) {} void f() { tra }";
+        let ws = ws_from(src);
+        let pos = pos_after(src, "{ tra");
+        let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
+        let items = complete(
+            &analysis,
+            None,
+            pos,
+            Some(&idx),
+            Some(ws.snapshot.symbols()),
+            &[],
+            false,
+        );
+        let count = items.iter().filter(|i| i.label == "trace").count();
+        assert_eq!(
+            count,
+            1,
+            "`trace` offered {} times: {:?}",
+            count,
+            labels(&items)
+        );
     }
 
     #[test]
