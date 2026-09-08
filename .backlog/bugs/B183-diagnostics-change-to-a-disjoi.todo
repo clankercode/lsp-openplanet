@@ -1,0 +1,58 @@
+---
+complexity: high
+created_at: "2026-09-08T23:57:09Z"
+depends_on: []
+estimate_hours: 3
+id: B183
+priority: high
+status: pending
+tags:
+    - false-positive
+title: Diagnostics change to a disjoint set when the same plugin is found under two --plugins-dir roots
+updated_at: "2026-09-08T23:57:09Z"
+---
+When the same plugin is discoverable through two `--plugins-dir` roots (a staged copy
+plus its source checkout), `check` produces a completely different — and disjoint —
+set of errors for identical source.
+
+## Repro
+
+`~/OpenplanetNext/Plugins/Editor` is the staged copy of
+`~/src/openplanet/my-plugins/tm-editor-plus-plus` (same `siteid = 377`, same version).
+
+One root at a time — 2 errors (see B182, both false positives but at least stable):
+
+    $ openplanet-lsp check --plugins-dir ~/OpenplanetNext/Plugins .
+    src/Components/Map/LmQualityTuner.as:1285:30: error: Only object types that support object handles can use &inout...
+    src/FromML.as:137:31: error: Only object types that support object handles can use &inout...
+    35 diagnostics (2 errors, 33 warnings)
+
+    $ openplanet-lsp check --plugins-dir ~/src/openplanet/my-plugins .
+    (identical 2 errors)
+
+Both roots together — the two `&inout` errors vanish and three unrelated
+overload-resolution errors appear instead:
+
+    $ openplanet-lsp check --plugins-dir ~/OpenplanetNext/Plugins --plugins-dir ~/src/openplanet/my-plugins .
+    src/Components/Inventory/Browser.as:239:80: error: No matching signatures to 'UI::BeginChild(string, vec2, const bool, UI::WindowFlags)'
+    src/Components/Map/Map_EditProps.as:134:72: error: No matching signatures to 'UI::InputTextMultiline(const string, wstring, vec2)'
+    src/UI/UI_TabGroup.as:168:63: error: No matching signatures to 'UI::BeginChild(<error>, vec2, UI::ChildFlags)'
+    36 diagnostics (3 errors, 33 warnings)
+
+Each configuration is deterministic across repeated runs; they just disagree with
+each other. All five errors are false positives (the plugin builds and loads on
+Openplanet 1.29.14). See B183 for the three UI ones.
+
+## Notes / suspicion
+
+The plugin appearing twice under different roots looks like it corrupts symbol or
+typedb resolution — a duplicate module shadowing the builtin `UI::` overload set
+would explain both the appearance of the UI errors and the disappearance of the
+`&inout` ones (analysis taking a different path / bailing earlier).
+
+Whatever the root cause, adding a plugins-dir should only ever *add* resolvable
+dependencies. It should never change diagnostics for the plugin under check into a
+disjoint set, and a duplicate plugin id across roots should probably be deduped
+(prefer the checked source) or warned about.
+
+Env: openplanet-lsp type db op=1.29.14 (next, Public, 6fd4200f); host xsm; 2026-09-09.
