@@ -1,0 +1,71 @@
+---
+complexity: medium
+created_at: "2026-09-08T23:57:30Z"
+depends_on: []
+estimate_hours: 2
+id: B184
+priority: high
+status: pending
+tags:
+    - false-positive
+title: 'False positives: UI::BeginChild / UI::InputTextMultiline overload resolution (bare enum to int, wstring to string)'
+updated_at: "2026-09-08T23:57:30Z"
+---
+Three `No matching signatures` errors against builtin `UI::` functions, all of which
+the game compiler accepts. They only surface in the duplicated-plugins-dir
+configuration described in B183, so they may share its root cause — but the
+signatures involved are worth checking on their own.
+
+## Reported (tm-editor-plus-plus, typedb op=1.29.14)
+
+1. `src/Components/Inventory/Browser.as:239`
+
+        if (UI::BeginChild(childId, vec2(InvDrawVals::colWidthFull, h), false, UI::WindowFlags::AlwaysVerticalScrollbar))
+
+   error: No matching signatures to `UI::BeginChild(string, vec2, const bool, UI::WindowFlags)`
+
+   Core typedb has: `bool BeginChild(const string&in id, const vec2&in size, bool border, int flags = UI::WindowFlags::None)`
+   — the call matches it, modulo `UI::WindowFlags` -> `int` (enum to int) and the
+   `false` literal being typed `const bool`.
+
+2. `src/UI/UI_TabGroup.as:168`
+
+        if (UI::BeginChild("inner|" + fullName, vec2(-1, -1), UI::ChildFlags::NavFlattened))
+
+   error: No matching signatures to `UI::BeginChild(<error>, vec2, UI::ChildFlags)`
+
+   Core typedb has: `bool BeginChild(const string&in id, const vec2&in size = vec2(), int childFlags = UI::ChildFlags::None, int flags = UI::WindowFlags::None)`.
+   Note line 153 of the same file is *not* flagged and differs only in passing
+   `UI::ChildFlags::NavFlattened | UI::ChildFlags::Border` (an OR expression, which
+   is already `int`) — so the trigger looks like a *bare* enum value in an `int` slot.
+   Also note the first argument renders as `<error>` here although the identical
+   `"str" + fullName` concat on line 153 resolves fine.
+
+3. `src/Components/Map/Map_EditProps.as:134`
+
+        map.Comments = UI::InputTextMultiline("Comment", map.Comments, vec2(0, UI::GetTextLineHeight() * 3.6));
+
+   error: No matching signatures to `UI::InputTextMultiline(const string, wstring, vec2)`
+
+   Core typedb has: `string InputTextMultiline(const string&in label, string str, const vec2&in size = vec2(0, 0), ...)`.
+   `map.Comments` is a `wstring` (CGameCtnChallenge property); Openplanet converts
+   wstring <-> string implicitly and the game accepts this call.
+
+## Reality
+
+Openplanet 1.29.14 compiles all three cleanly (tm-editor-plus-plus remote build
+2026-09-09 09:24, plugin loaded).
+
+## Isolation attempt
+
+A standalone plugin reproducing all three shapes (bare enum arg, bool-border
+overload, wstring into a string param, incl. `CGameCtnChallenge@ map` for
+`map.Comments`) reports **0 errors** under either single plugins-dir *and* under
+both together. So these need the full tm-editor-plus-plus context; the minimal
+shapes alone are handled correctly. Repro command:
+
+    cd ~/src/openplanet/my-plugins/tm-editor-plus-plus
+    openplanet-lsp check --plugins-dir ~/OpenplanetNext/Plugins --plugins-dir ~/src/openplanet/my-plugins .
+
+Suggested check regardless of B183: enum-to-int implicit conversion at builtin
+parameter slots, and wstring-to-string at builtin parameter slots.
