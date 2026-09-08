@@ -664,10 +664,38 @@ fn complete_identifier(
         }
     }
 
-    // External source-writable scopes.
+    let typed_prefix = {
+        let start = source[..offset]
+            .rfind(|c: char| !is_ident_char(c))
+            .map_or(0, |i| {
+                i + source[i..].chars().next().map_or(1, |c| c.len_utf8())
+            });
+        source[start..offset].to_lowercase()
+    };
+
+    // External source-writable namespaces. Class scopes are offered only
+    // after their parent identifier (`CGameCtnApp::`) and not as bare modules.
     if let Some(index) = type_index {
-        for ns in index.source_scopes() {
-            items.push(make_item(&ns, CompletionItemKind::MODULE));
+        for ns in index.source_namespace_scopes() {
+            if ns.to_lowercase().starts_with(&typed_prefix) {
+                items.push(make_item(&ns, CompletionItemKind::MODULE));
+            }
+        }
+    }
+
+    // B179: source-visible engine types at an identifier position. Only
+    // complete names are offered here; nested types remain behind their
+    // declaring class's `::` completion. The index applies the same
+    // source-spelling and registration gate used by type resolution, so
+    // loader-only foundation records such as `Bool` do not contradict the
+    // checker.
+    if let Some(index) = type_index {
+        let existing: std::collections::HashSet<String> =
+            items.iter().map(|i| i.label.clone()).collect();
+        for (name, kind) in index.source_type_completions(&typed_prefix) {
+            if !existing.contains(&name) {
+                items.push(make_item(&name, scope_member_completion_kind(kind)));
+            }
         }
     }
 
@@ -1267,6 +1295,73 @@ mod tests {
                 "synthetic Nadeo module {synthetic:?} leaked into completion: {labels:?}"
             );
         }
+    }
+
+    #[test]
+    fn identifier_completion_offers_source_visible_engine_types_with_kinds() {
+        let idx = index_with_anonymous_member_enums();
+        for (prefix, name, kind) in [
+            ("vec", "vec3", CompletionItemKind::CLASS),
+            ("dictio", "dictionary", CompletionItemKind::CLASS),
+            ("Cor", "CoroutineFunc", CompletionItemKind::INTERFACE),
+            ("Virt", "VirtualKey", CompletionItemKind::ENUM),
+            ("CGameCtnA", "CGameCtnApp", CompletionItemKind::CLASS),
+        ] {
+            let src = format!("void f() {{ auto x = {prefix} }}");
+            let marker = format!("= {prefix}");
+            let items = complete_with_shortcuts(&src, &marker, &idx, &[], false);
+            let item = items
+                .iter()
+                .find(|item| item.label == name)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "`{name}` missing after typing `{prefix}`: {:?}",
+                        labels(&items)
+                    )
+                });
+            assert_eq!(item.kind, Some(kind), "wrong kind for `{name}`");
+            assert_eq!(
+                item.filter_text, None,
+                "ordinary type `{name}` has a filter payload"
+            );
+            assert_eq!(
+                item.sort_text, None,
+                "ordinary type `{name}` has a sort payload"
+            );
+        }
+    }
+
+    #[test]
+    fn identifier_completion_type_prefix_filters_without_leaking_invalid_names() {
+        let idx = index_with_anonymous_member_enums();
+        let src = "void f() { auto x = Bool }";
+        let items = complete_with_shortcuts(&src, "= Bool", &idx, &[], false);
+        let labels = labels(&items);
+        assert!(
+            !labels.contains(&"Bool"),
+            "unregistered foundation type leaked: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"Real"),
+            "unregistered foundation type leaked: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"Int8"),
+            "unregistered foundation type leaked: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"vec3"),
+            "prefix filtering should omit vec3: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn identifier_completion_types_are_top_level_only() {
+        let idx = index_with_anonymous_member_enums();
+        let src = "void f() { auto x = Font }";
+        let items = complete_with_shortcuts(&src, "= Font", &idx, &[], false);
+        assert!(!labels(&items).contains(&"UI::Font"));
+        assert!(!labels(&items).contains(&"Plot"));
     }
 
     #[test]

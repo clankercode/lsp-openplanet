@@ -1531,7 +1531,10 @@ openplanet_lsp::server::completion::tests::core_namespace_remains_an_identifier_
 openplanet_lsp::server::completion::tests::every_offered_injected_method_is_one_the_checker_accepts
 openplanet_lsp::server::completion::tests::every_shortcut_label_is_a_spelling_the_checker_accepts
 openplanet_lsp::server::completion::tests::identifier_completion_does_not_offer_namespaced_engine_functions_bare
+openplanet_lsp::server::completion::tests::identifier_completion_offers_source_visible_engine_types_with_kinds
 openplanet_lsp::server::completion::tests::identifier_completion_offers_top_level_engine_functions
+openplanet_lsp::server::completion::tests::identifier_completion_type_prefix_filters_without_leaking_invalid_names
+openplanet_lsp::server::completion::tests::identifier_completion_types_are_top_level_only
 openplanet_lsp::server::completion::tests::member_completion_does_not_inject_methods_on_a_workspace_type_shadow
 openplanet_lsp::server::completion::tests::member_completion_does_not_leak_an_exact_list_method_to_other_receivers
 openplanet_lsp::server::completion::tests::member_completion_offers_an_injected_method_on_its_exact_receiver

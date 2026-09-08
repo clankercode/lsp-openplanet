@@ -1222,6 +1222,52 @@ impl TypeIndex {
         globals
     }
 
+    /// Top-level source-visible scopes, keeping namespaces separate from
+    /// class/enum/funcdef names that happen to be scopes for `::` lookup.
+    pub fn source_namespace_scopes(&self) -> Vec<String> {
+        let mut scopes: Vec<String> = self
+            .scopes
+            .iter()
+            .filter(|scope| !scope.contains("::") && self.source_name_key(scope).is_none())
+            .cloned()
+            .collect();
+        scopes.sort();
+        scopes
+    }
+
+    /// Direct source-visible types, with their declaration kind. Nadeo
+    /// classes are admitted only when the dump marks them with `c`; the
+    /// unmarked foundation records are metadata rather than script types.
+    pub fn source_type_completions(&self, typed_prefix: &str) -> Vec<(String, ScopeMemberKind)> {
+        let typed_prefix = typed_prefix.to_lowercase();
+        let mut types = Vec::new();
+        for (spelling, key) in &self.source_names {
+            if spelling.contains("::") || !spelling.to_lowercase().starts_with(&typed_prefix) {
+                continue;
+            }
+            let kind = if self.enums.contains_key(key) {
+                ScopeMemberKind::Enum
+            } else if self.funcdefs.contains_key(key) {
+                ScopeMemberKind::Funcdef
+            } else if let Some(info) = self.types.get(key) {
+                if info.source == TypeSource::Nadeo
+                    && info.namespace.as_deref() == Some("MwFoundations")
+                    && info.parent.is_none()
+                    && info.methods.is_empty()
+                    && info.properties.is_empty()
+                {
+                    continue;
+                }
+                ScopeMemberKind::Class
+            } else {
+                continue;
+            };
+            types.push((spelling.clone(), kind));
+        }
+        types.sort_by(|a, b| a.0.cmp(&b.0));
+        types
+    }
+
     /// Which of the three declaration tables `key` — a value from
     /// [`Self::source_names`] — lives in.
     ///
