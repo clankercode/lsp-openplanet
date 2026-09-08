@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-09-08T21:46:03Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-09-08T23:24:52Z"
 complexity: medium
 created_at: "2026-09-06T04:12:06Z"
 depends_on: []
+duration_minutes: 98.82842938338334
 estimate_hours: 2
 id: B179
 priority: medium
 started_at: "2026-09-08T21:46:03Z"
-status: in_progress
+status: done
 tags: []
 title: Top-level engine types (vec3, string, dictionary, CoroutineFunc, VirtualKey, Nadeo classes) are never offered at identifier completion
-updated_at: "2026-09-08T21:46:03Z"
+updated_at: "2026-09-08T23:24:52Z"
 ---
 Sibling of the top-level engine FUNCTION completion gap (filed 2026-09-06). Observed by code reading of src/server/completion.rs complete_identifier: at an identifier position the only engine names offered are namespaces (TypeIndex::source_scopes) and shortcut-namespace members, so 'auto v = vec' never offers vec3, 'dictio' never offers dictionary, 'Coroutine' never offers CoroutineFunc, and a bare Nadeo class name like CGameCtnApp is only reachable if it happens to declare an enum (then it is offered as a MODULE, the wrong kind). Not folded into the function fix because it is a real design question, not a one-liner: source_names carries every Nadeo class including MwFoundations names the game never registers (Bool, Real, Int8 - see spelling_is_source_name / has_type notes), so a naive dump would offer spellings the checker then refuses (the B069 failure shape), and the Nadeo class list is thousands of entries per completion response. Needs: the has_type predicate as the gate, a kind per entry (CLASS/ENUM/INTERFACE/funcdef), and a decision on payload size (prefix filter like shortcuts, or rely on client filtering).
 

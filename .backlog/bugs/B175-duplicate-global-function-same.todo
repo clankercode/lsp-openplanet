@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-09-08T21:46:03Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-09-08T23:24:52Z"
 complexity: medium
 created_at: "2026-09-02T18:14:53Z"
 depends_on: []
+duration_minutes: 98.82831806456667
 estimate_hours: 1
 id: B175
 priority: high
 started_at: "2026-09-08T21:46:03Z"
-status: in_progress
+status: done
 tags: []
 title: Duplicate global function (same name + params) across files is not flagged
-updated_at: "2026-09-08T21:46:03Z"
+updated_at: "2026-09-08T23:24:52Z"
 ---
 ## Goal
 Flag a global function declared twice with the same name and parameter list within one plugin module, even when the two declarations live in different files.
