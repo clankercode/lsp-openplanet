@@ -191,3 +191,15 @@ Also unfixed, and neither caused nor fixed by B052/B053: a qualified VALUE
 access does not walk ancestors in-game (`UI::GlassSmash`, `UI::Turbo`,
 `CGameMenu::Turbo` are all `No matching symbol`) and both the merge-base and
 post-B053 binaries are silent on all three.
+
+## 2026-09-09, tm-editor-plus-plus (typedb op=1.29.14) -> tracked in backlog
+
+- B182: `int[] &inout` / `ML_Event@[] &inout` params rejected with
+  "Only object types that support object handles can use &inout" (minimal repro in the bug).
+- B183: same source yields a *disjoint* error set when the plugin is reachable via two
+  `--plugins-dir` roots (staged copy + source checkout); the B182 errors vanish and the
+  B184 ones appear.
+- B184: `UI::BeginChild(string, vec2, bool, UI::WindowFlags)`, `UI::BeginChild(string, vec2, UI::ChildFlags)`
+  and `UI::InputTextMultiline(string, wstring, vec2)` reported as "No matching signatures";
+  suspected bare-enum-to-int and wstring-to-string conversions at builtin parameter slots.
+  Only reproduces in the B183 configuration.
