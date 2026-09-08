@@ -415,3 +415,300 @@ Workaround / fix:
     Remove the stale 1-arg import (or pass the optional args explicitly to disambiguate).
 
 The LSP today does not flag this (it resolved the call without complaint).
+
+## 2026-09-01, tm-editor-plus-plus
+
+### Case: engine struct properties without set/opAssign
+Plugin source:
+    box.AABB = aabb;
+    GmBoxAligned edited = aabb;
+    multi.Spheres[i] = el;
+
+Compiler reports (game-side):
+    IE_GmSurf.as (73, 38) :  ERR : The property has no set accessor
+    IE_GmSurf.as (189, 26) :  ERR : No appropriate opAssign method found in 'GmBoxAligned' for value assignment
+    IE_GmSurf.as (190, 77) :  ERR : Non-const method call on read-only object reference
+    IE_GmSurf.as (209, 34) :  ERR : No appropriate opAssign method found in 'SGmSurfMultiSphereElem' for value assignment
+
+Workaround / fix:
+    Do not copy or assign GmBoxAligned / SGmSurfMultiSphereElem by value. Write AABB via Dev::SetOffset on the parent GmSurf (Center at AABB off, HalfDiag at +0xC). Mutate MultiSphere elems through Spheres[i].Pos / .Radius, or Dev writes. Do not take `const GmBoxAligned &in` — `get_m_Center()` is non-const.
+
+The LSP today does not flag this.
+
+## 2026-09-02, tm-editor-plus-plus
+
+### Case: return value from void function [B172]
+Plugin source (FindPatternCached.as):
+    void Dev_FindPatternCached(const string &in pat) {
+        return PatternCache::Get(pat);
+    }
+
+Compiler reports (game-side):
+    Dev/FindPatternCached.as (21, 5) :  ERR : Can't return value when return type is 'void'
+
+Workaround / fix:
+    Declare the function `uint64` (it is a cache wrapper around Dev::FindPattern).
+
+The LSP today does not flag this (`openplanet-lsp check` on the full E++ tree: 0 errors).
+
+### Case: dictionaryValue has no implicit conversion to uint64 [B173]
+Plugin source (FindPatternCached.as):
+    dictionary _cache;
+    uint64 Get(const string &in pat) {
+        if (_cache.Exists(pat)) {
+            return _cache[pat];
+        }
+        return 0;
+    }
+
+Compiler reports (game-side):
+    Dev/FindPatternCached.as (6, 13) :  ERR : No conversion from 'dictionaryValue' to 'uint64' available.
+
+Workaround / fix:
+    `_cache.Get(pat, cached)` with a typed out-param. `dictionaryValue` has `int64 opConv()` / `double opConv()` only.
+
+The LSP today does not flag this.
+
+### Case: assigning a void call result to a typed variable [B174]
+Plugin source (IE_GmSurf.as):
+    uint64 fn = Dev_FindPatternCached(pat);
+
+Compiler reports (game-side):
+    Components/ItemEditor/IE_GmSurf.as (316, 21) :  ERR : Data type can't be 'void'
+
+Workaround / fix:
+    Make the callee return `uint64`. Do not use a void call as a value.
+
+The LSP today does not flag this. Sibling of B172 (definition site vs call site).
+
+## 2026-09-02, tm-editor-plus-plus
+
+### Case: interface methods do not carry implementing-class default args
+Plugin source:
+    shared interface IKinematicConstraint {
+        IKinematicConstraint@ SimpleLoop(bool isRot, uint period, bool andReverse, bool reverse);
+    }
+    class KinematicConstraint : IKinematicConstraint {
+        IKinematicConstraint@ SimpleLoop(bool isRot, uint period, bool andReverse = false, bool reverse = false) { return this; }
+    }
+    // After a fluent method that returns IKinematicConstraint@:
+    kc.Rot(axis).SimpleLoop(true, 1000);
+    kc.Rot(axis).SimpleLoop(true, 1000, false);
+
+Compiler reports (game-side):
+    IE_CreateClouds.as (135, 18) :  ERR : No matching signatures to 'IKinematicConstraint::SimpleLoop(const bool, const uint, const bool)'
+    Candidates are: IKinematicConstraint@ SimpleLoop(bool isRot, uint period, bool andReverse, bool reverse)
+    Rejected due to not enough parameters
+
+Workaround / fix:
+    Put the default values on the interface declaration itself (or add arity overloads on the interface). Class-only defaults are invisible when the static type is the interface.
+
+The LSP today does not flag this (`openplanet-lsp check` on the full E++ tree: 0 errors; game compile: 12 errors).
+
+## 2026-09-04, tm-editor-plus-plus
+
+### Case: void-returning UI::BeginTabBar used as a condition
+Plugin source:
+    if (UI::BeginTabBar("x")) { ... UI::EndTabBar(); }
+
+Compiler reports (game-side):
+    ItemBuilder/UI_ItemBuilderWindow.as (263, 17) :  ERR : Expression must be of boolean type, instead found 'void'
+
+Workaround / fix:
+    UI::BeginTabBar returns void (OpenplanetCore.json); call it as a statement.
+
+The LSP today does not flag this.
+
+## 2026-09-07, tm-ghosts2 (MP4 game target)
+
+### Case: void-returning UI::BeginTabBar used in `if` (MP4 core API differs from TM2020)
+Plugin source:
+    if (UI::BeginTabBar("g2-tabs")) { ... UI::EndTabBar(); }
+
+Compiler reports (game-side, Openplanet4 1.29.14):
+    Main.as (34, 13) :  ERR : Expression must be of boolean type, instead found 'void'
+
+Workaround / fix:
+    Call UI::BeginTabBar(...) as a statement; only BeginTabItem returns bool on MP4.
+    ~/Openplanet4/OpenplanetCore.json declares BeginTabBar as void, so the typedb had the info.
+
+The LSP today does not flag this with `--game-target MP4 --typedb-dir ~/.cache/openplanet-lsp-typedb-mp4`
+(0 diagnostics). Either the void-in-boolean-context check is missing or the MP4 core DB is not used for UI::*.
+
+## 2026-09-07, tm-ghosts2-mp4pack (MP4 / Openplanet4)
+
+### Case: re-declaring imports that a dependency's `exports` file already injects
+Plugin source (pack plugin with `dependencies = ["tm-ghosts2"]`, and tm-ghosts2's info.toml has `exports = ["Exports.as"]`
+containing `namespace Ghosts2 { import Json::Value@ ListGhosts() from "Ghosts2"; ... }`):
+    namespace Ghosts2 {
+        import Json::Value@ ListGhosts() from "Ghosts2";
+    }
+
+Compiler reports (game-side):
+    C:/users/steamuser/Openplanet4/Plugins/tm-ghosts2/Exports.as (4, 5) :  ERR : A function with the same name and parameters already exists
+    (one line per import in the dependency's Exports.as, attributed to the DEPENDENCY's file, then "Script compilation failed!")
+
+Workaround / fix:
+    Delete the manual import block; Openplanet compiles every dependency's `exports` files into the dependent module.
+
+The LSP today does not flag this (it does not inject dependency `exports` files, so it sees no duplicate; ideally it
+would model the injection and then report the duplicate at the plugin's own import line).
+
+## 2026-09-08, tm-ghosts2 (MP4 / Openplanet4 1.29.14)
+
+### Case: Icons::SlidersH accepted by the LSP, missing in the MP4 build
+Plugin source:
+    UI::Button(Icons::SlidersH + "##scrub");
+
+Compiler reports (game-side):
+    C:/users/steamuser/Openplanet4/Plugins/tm-ghosts2/UI_Ghosts.as (157, 54) :  ERR : No matching symbol 'Icons::SlidersH'
+
+Workaround / fix:
+    Use Icons::Sliders (the MP4 Openplanet icon set is the older FontAwesome 4.x list without the *H/*V variants).
+
+The LSP today does not flag this (with --game-target MP4 it should use the MP4 icon list, not the TM2020 one).
+
+## 2026-09-08, tm-mp4-control
+
+### Case: Reflection::TypeOf / GetType return const handles
+Plugin source:
+    Reflection::MwClassInfo@ ty;
+    @ty = Reflection::TypeOf(nod);      // also Reflection::GetType(name)
+
+Compiler reports (game-side):
+    Commands.as (919, 19) :  ERR : Can't implicitly convert from 'const Reflection::MwClassInfo@' to 'Reflection::MwClassInfo@'.
+
+Workaround / fix:
+    declare `const Reflection::MwClassInfo@ ty;`
+
+The LSP today does not flag this (it accepted the non-const handle).
+
+## 2026-09-07, tm-editor-plus-plus
+
+### Case: duplicate free-function definition across files in the same namespace
+Plugin source:
+    // src/Editor/Items.as
+    namespace Editor { CPlugGameSkin@ GetItemModelGameSkin(CGameItemModel@ model) { ... } }
+    // src/Editor/Skins.as
+    namespace Editor { CPlugGameSkin@ GetItemModelGameSkin(CGameItemModel@ model) { ... } }
+
+Compiler reports (game-side):
+    C:/users/steamuser/OpenplanetNext/Plugins/Editor/Editor/Skins.as (110, 5) :  ERR : A function with the same name and parameters already exists
+    (same for Editor/Items.as (454, 5) GetInventoryBlockInfoByName vs Editor/Inventory.as:36, and Skins.as 115/120)
+
+Workaround / fix:
+    Delete one copy. Arose from a merge that kept an older file alongside the file the helpers had been moved to.
+
+The LSP today does not flag this (openplanet-lsp check reported 0 errors on the tree that failed in-game).
+
+## 2026-09-08, tm-editor-plus-plus
+
+### Case: interface handle passed where CMwNod@ is expected
+Plugin source:
+    bool F(CMwNod@ root) { return root !is null; }
+    ISceneVis@ vis = GetApp().GameScene;   // ISceneVis has no CMwNod parent in the type db
+    F(vis);
+
+Compiler reports (game-side):
+    Components/Map/LmElemLink_Dev.as (187, 13) :  ERR : No matching signatures to '_TryRoot(Session@&, const string, ISceneVis@&, uint, uint64)'
+
+Workaround / fix:
+    Interface types (ISceneVis, IScenePhy, ...) are not CMwNod; read their pointer from the owning
+    member slot instead (Dev::GetOffsetUint64(app, GetOffset("CGameCtnApp", "GameScene"))).
+
+The LSP today does not flag this (it accepted the implicit ISceneVis@ -> CMwNod@ conversion).
+
+## 2026-09-08, tm-turbo-probe (game target TURBO)
+
+### Case 1: typedb member with "t": 0 is a method, not a property
+Plugin source:
+    auto menus = cast<CTrackManiaMenus>(mpApp.MenuManager);
+    trace("ShowMenus: " + menus.ShowMenus + " / " + menus.ShowDialogs);
+
+Compiler reports (game-side):
+    C:/users/steamuser/OpenplanetTurbo/Plugins/tm-turbo-probe/Main.as (59, 46) :  ERR : Invalid operation on method
+
+Workaround / fix:
+    Do not read them as values; they are void methods (call them, or leave them alone).
+
+The LSP today does not flag this: `openplanet-lsp check --game-target TURBO` reported
+"0 diagnostics" on the same bytes the game then refused to compile.
+
+The distinguishing field is in OpenplanetTurbo.json: CTrackManiaMenus.ShowMenus is
+    {"n": "ShowMenus", "i": 142, "t": 0}
+i.e. "t" is the integer 0 rather than a type-name string, which is how the typedb marks a
+void method. Members that really are properties carry a type string, e.g.
+    {"n": "SelectedChallenge", "i": 0, "t": "CGameCtnChallenge@", "c": 1}
+    {"n": "GhostFileName", "i": 6, "t": "wstring"}
+So the check is: treat a member whose "t" is not a string as a method and reject
+value-position uses of it (arithmetic, string concatenation, comparison, assignment).
+Seen on TURBO, but the encoding is shared with the other typedbs.
+
+## 2026-09-08, tm-mp4-control (Turbo target)
+
+### Case 1: MwFastBuffer<T>@ return type accepted by the LSP, rejected by the game
+Plugin source:
+    MwFastBuffer<CGameGhostScript@>@ ScriptGhosts(CGamePlaygroundScript@ ps) {
+        return ps.DataMgr.Ghosts;
+    }
+
+Compiler reports (game-side):
+    Commands.as (66, 36) :  ERR : Object handle is not supported for this type
+
+Workaround / fix:
+    Copy into an `array<T@>` and return that by value.
+
+The LSP today does not flag this.
+
+### Case 2: a non-const nod/value handle parameter the game will not bind
+Plugin source:
+    uint ClassSize(Reflection::MwClassInfo@ ci) { return ci.Size; }
+    ... ClassSize(Reflection::TypeOf(nod))
+
+Compiler reports (game-side):
+    Commands.as (788, 39) :  ERR : No matching signatures to 'ClassSize(const Reflection::MwClassInfo@&)'
+
+Workaround / fix:
+    Declare the parameter `const Reflection::MwClassInfo@`.
+
+The LSP today does not flag this: it accepts the non-const parameter and the const argument.
+
+## 2026-09-08, tm-mp4-control (Turbo build)
+
+### Case: CGameManiaApp::LayerCustomEvent takes MwFastBuffer<wstring>, not string[]
+Plugin source:
+    array<string> params;
+    ta.LayerCustomEvent(layer, "MyEvent", params);
+
+Compiler reports (game-side):
+    Commands.as (1719, 12) : ERR : No matching signatures to
+    'CGameManiaAppTitle::LayerCustomEvent(CGameUILayer@&, string, string[]&)'
+
+Workaround / fix:
+    MwFastBuffer<wstring> params; params.Add(wstring("x"));
+    ta.LayerCustomEvent(layer, wstring("MyEvent"), params);
+
+openplanet-lsp accepted the array<string> and the plain string for the wstring parameter.
+The documented signature is:
+    void LayerCustomEvent(CGameUILayer@ Layer, wstring Type, MwFastBuffer<wstring>& Data)
+
+## 2026-09-08, tm-ghosts2
+
+### Case 1: `return;` in a non-void function is not flagged
+Plugin source:
+    CGameGhostScript@ Turbo_RetrieveMedalFromRecords(uint level) {
+        ...
+        if (!LoadStillWanted()) { SetStatus("..."); return; }
+        return g.DataState == CGameGhostScript::EDataState::Ready ? g : null;
+    }
+
+Compiler reports (game-side):
+    Loading.as (348, 104) :  ERR : Must return a value
+    Loading.as (363, 104) :  ERR : Must return a value
+
+Workaround / fix:
+    `return null;` in a handle-returning function.
+
+`openplanet-lsp check` reported "0 errors/warnings" for the same bytes the game
+then refused to compile, for both the TURBO and MP4 targets. A missing return
+value is a plain type-check that the LSP should be able to catch.

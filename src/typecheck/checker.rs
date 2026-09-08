@@ -4398,6 +4398,16 @@ impl<'a> Checker<'a> {
                     compatible = false;
                     evidence_span = Some(args[i].value.span);
                 }
+                // A resolved named/object value cannot bind a primitive
+                // parameter. Keep unknown/error shapes neutral, but reject
+                // concrete engine types such as vec3 for Math::Min's int and
+                // float overloads.
+                if matches!(arg_core, TypeRepr::Named(_))
+                    && matches!(param_core, TypeRepr::Primitive(_))
+                {
+                    compatible = false;
+                    evidence_span = Some(args[i].value.span);
+                }
                 // Named / handle / mixed shapes stay neutral — the strict
                 // checks live on the unique-overload path.
             }
@@ -16310,7 +16320,26 @@ mod b150_container_length_property_tests {
         }
     }
 
-    /// The rule is about the ACCESSOR's existence, not about the typedb: a
+    /// `vec2`/`vec3`/`vec4`/`quat` are shipped data, not a contrivance.
+    #[test]
+    fn math_min_rejects_vector_arguments_without_a_vector_binding() {
+        let idx = typedb();
+        for vec_ty in ["vec2", "vec3", "vec4", "quat"] {
+            let src = format!("void f() {{ {vec_ty} a, b; Math::Min(a, b); }}");
+            let texts = no_match_texts(&check(&src, &idx));
+            assert_eq!(texts.len(), 1, "{src} must reject: {texts:?}");
+        }
+        for src in [
+            "void f() { int a, b; Math::Min(a, b); }",
+            "void f() { float a, b; Math::Min(a, b); }",
+        ] {
+            assert!(
+                no_match_texts(&check(src, &idx)).is_empty(),
+                "{src} must bind"
+            );
+        }
+    }
+
     /// workspace class with both spellings takes the property read, and one
     /// with only the method still yields a method reference. Stated for a
     /// non-`Length` name so nothing can be passing on the member's name.
