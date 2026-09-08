@@ -1,16 +1,18 @@
 ---
+claimed_at: "2026-09-08T21:46:03Z"
+claimed_by: cli-user
+completed_at: null
 complexity: medium
 created_at: "2026-09-02T06:00:37Z"
 depends_on: []
 estimate_hours: 1
 id: B174
 priority: high
-status: pending
-tags:
-    - typecheck
-    - false-negative
+started_at: "2026-09-08T21:46:03Z"
+status: in_progress
+tags: []
 title: Assigning a void call result to a typed variable is not flagged
-updated_at: "2026-09-02T06:00:37Z"
+updated_at: "2026-09-08T21:46:03Z"
 ---
 ## Goal
 Flag using a `void` call as a value (`uint64 x = VoidFn();`, or any non-void context).

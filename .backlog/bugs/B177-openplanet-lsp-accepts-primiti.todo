@@ -1,16 +1,17 @@
 ---
+claimed_at: "2026-09-08T21:46:03Z"
+claimed_by: cli-user
+completed_at: null
 complexity: medium
 created_at: "2026-09-02T18:44:18Z"
 depends_on: []
 estimate_hours: 1
 id: B177
 priority: high
-status: pending
-tags:
-    - checker
-    - game-parity
-    - parameters
+started_at: "2026-09-08T21:46:03Z"
+status: in_progress
+tags: []
 title: openplanet-lsp accepts primitive &inout parameters that Openplanet rejects
-updated_at: "2026-09-02T18:44:18Z"
+updated_at: "2026-09-08T21:46:03Z"
 ---
 Observed while building tm-editor-plus-plus on 2026-09-03. Minimal shape: void F(uint &inout value) {}. openplanet-lsp check --format plain . exits 0 with no diagnostic for the parameter. Openplanet 1.29.14 rejects it at compile time: Only object types that support object handles can use &inout. Use &in or &out instead. The checker should diagnose primitive &inout parameters and a text fixture plus game-parity corpus case should preserve the exact rule. The original failing implementation had three primitive &inout parameters (uint, uint, uint64); replacing them with fields on a small object made the plugin compile.

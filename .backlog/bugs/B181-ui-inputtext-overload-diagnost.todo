@@ -1,17 +1,18 @@
 ---
+claimed_at: "2026-09-08T21:46:03Z"
+claimed_by: cli-user
+completed_at: null
 complexity: medium
 created_at: "2026-09-08T21:37:27Z"
 depends_on: []
 estimate_hours: 1
 id: B181
 priority: medium
-status: pending
-tags:
-    - lsp
-    - angelscript
-    - ui-inputtext
+started_at: "2026-09-08T21:46:03Z"
+status: in_progress
+tags: []
 title: UI::InputText overload diagnostics reject valid changed-flag calls
-updated_at: "2026-09-08T21:37:27Z"
+updated_at: "2026-09-08T21:46:03Z"
 ---
 The language server reports six errors for existing Openplanet AngelScript calls using the UI::InputText overload with a mutable string and bool changed output, optionally followed by UI::InputTextFlags.
 

@@ -1,16 +1,18 @@
 ---
+claimed_at: "2026-09-08T21:46:03Z"
+claimed_by: cli-user
+completed_at: null
 complexity: medium
 created_at: "2026-09-02T18:14:58Z"
 depends_on: []
 estimate_hours: 2
 id: B176
 priority: high
-status: pending
-tags:
-    - typecheck
-    - false-negative
+started_at: "2026-09-08T21:46:03Z"
+status: in_progress
+tags: []
 title: Call with non-convertible handle argument is not flagged (no matching signatures)
-updated_at: "2026-09-02T18:14:58Z"
+updated_at: "2026-09-08T21:46:03Z"
 ---
 ## Goal
 Flag a call whose argument types match no overload of the callee — specifically handle arguments whose class/interface does not implicitly convert to any candidate parameter type.
