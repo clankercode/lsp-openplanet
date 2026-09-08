@@ -30,3 +30,5 @@ No matching signatures to UI::InputText(<label>, string, bool, UI::InputTextFlag
 The affected calls compile/are accepted by the Openplanet runtime toolchain in the plugin project, so the LSP appears to be missing or incorrectly modeling this overload. The same build also reports one unrelated signed/unsigned warning in src/SemVer.as:12.
 
 Please add or correct the UI::InputText signature and add a regression fixture covering the changed-output bool form, including the flags variant.
+
+Decision: separate overload/signature lane; model mutable string plus bool changed as an out parameter, with optional flags variant, and preserve existing three-argument bool-value rejection.
