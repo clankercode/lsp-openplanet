@@ -1,0 +1,31 @@
+---
+complexity: medium
+created_at: "2026-09-08T21:37:27Z"
+depends_on: []
+estimate_hours: 1
+id: B181
+priority: medium
+status: pending
+tags:
+    - lsp
+    - angelscript
+    - ui-inputtext
+title: UI::InputText overload diagnostics reject valid changed-flag calls
+updated_at: "2026-09-08T21:37:27Z"
+---
+The language server reports six errors for existing Openplanet AngelScript calls using the UI::InputText overload with a mutable string and bool changed output, optionally followed by UI::InputTextFlags.
+
+Observed while running ./build.sh in tm-dipspp-editor with openplanet-lsp 1.29.14:
+- src/Ed/Components/Assets.as:161
+- src/Ed/Components/Assets.as:189
+- src/Ed/Components/Assets.as:322
+- src/Ed/Components/Assets.as:499
+- src/Ed/Components/Floors.as:328
+- src/Ed/LoadProjectTab.as:189
+
+Diagnostic:
+No matching signatures to UI::InputText(<label>, string, bool, UI::InputTextFlags)
+
+The affected calls compile/are accepted by the Openplanet runtime toolchain in the plugin project, so the LSP appears to be missing or incorrectly modeling this overload. The same build also reports one unrelated signed/unsigned warning in src/SemVer.as:12.
+
+Please add or correct the UI::InputText signature and add a regression fixture covering the changed-output bool form, including the flags variant.
