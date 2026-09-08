@@ -1,0 +1,60 @@
+---
+complexity: medium
+created_at: "2026-09-08T23:56:53Z"
+depends_on: []
+estimate_hours: 2
+id: B182
+priority: high
+status: pending
+tags:
+    - false-positive
+title: 'False positive: array parameters rejected for &inout (Only object types that support object handles can use &inout)'
+updated_at: "2026-09-08T23:56:53Z"
+---
+False positive: the game compiler accepts `&inout` on script array parameters; openplanet-lsp rejects them.
+
+## Repro (minimal, standalone plugin)
+
+`Main.as`:
+
+    void ApplyClassToEntries(int[] &inout classes, const int[] &in entryIxs, int cls) {
+        for (uint i = 0; i < entryIxs.Length; i++) classes[uint(entryIxs[i])] = cls;
+    }
+
+    void CoalesceStrings(string[] &inout messages, const string &in m) {
+        messages.InsertLast(m);
+    }
+
+    void UseThem() {
+        int[] a = {1,2,3};
+        int[] ix = {0};
+        ApplyClassToEntries(a, ix, 7);
+        string[] s;
+        CoalesceStrings(s, "x");
+    }
+
+Command:
+
+    openplanet-lsp check --plugins-dir ~/OpenplanetNext/Plugins <dir>
+
+## LSP reports
+
+    Main.as:1:26: error: Only object types that support object handles can use &inout. Use &in or &out instead.
+    Main.as:5:22: error: Only object types that support object handles can use &inout. Use &in or &out instead.
+
+## Reality
+
+`array<T>` is a reference type that supports handles (`array<int>@`), so `&inout` is legal.
+Verified game-side on Openplanet 1.29.14: tm-editor-plus-plus contains both shapes
+(`src/Components/Map/LmQualityTuner.as:1285` `int[] &inout classes`,
+`src/FromML.as:137` `ML_Event@[] &inout messages`) and compiles + loads cleanly
+(remote build 2026-09-09 09:24, "Build: 1059.67 ms", plugin loaded).
+
+## Expected
+
+No diagnostic for `&inout` on script array types (`T[]` / `array<T>`), including
+arrays of handles (`ML_Event@[] &inout`). The rule should only fire for value types
+that genuinely do not support handles (primitives, `vec3`, etc).
+
+Found while checking tm-editor-plus-plus; blocks its `build.sh` (which gates on
+`openplanet-lsp check`) and forced an `EPP_SKIP_LSP=1` bypass.
