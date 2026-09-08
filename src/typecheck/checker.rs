@@ -4398,11 +4398,12 @@ impl<'a> Checker<'a> {
                     compatible = false;
                     evidence_span = Some(args[i].value.span);
                 }
-                // A resolved named/object value cannot bind a primitive
-                // parameter. Keep unknown/error shapes neutral, but reject
-                // concrete engine types such as vec3 for Math::Min's int and
-                // float overloads.
-                if matches!(arg_core, TypeRepr::Named(_))
+                // Core flag enums bind their underlying integer slots even
+                // though source expressions resolve to named values. Keep
+                // rejecting known math value types, which are distinct from
+                // integer parameters and have no implicit conversion.
+                if matches!(arg_core, TypeRepr::Named(arg_n) if
+                    !self.scope.has_enum(arg_n) && is_math_value_type(arg_n))
                     && matches!(param_core, TypeRepr::Primitive(_))
                 {
                     compatible = false;

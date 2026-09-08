@@ -1513,6 +1513,34 @@ fn check_command_issue_repro_47_inputtext_overload_diagnoses() {
     );
 }
 
+/// B181: mutable string plus bool `changed` is a valid UI::InputText overload,
+/// with optional flags and callback arguments after the output parameter. The
+/// bool value forms remain invalid, both with and without explicit flags.
+#[test]
+fn check_command_issue_repro_b181_inputtext_changed_output_is_precise() {
+    let (_, stdout, stderr) = run_issue_repro_typedb("b181-inputtext-overload");
+    let errors: Vec<&str> = stdout.lines().filter(|l| l.contains("error:")).collect();
+    assert_eq!(
+        errors.len(),
+        2,
+        "only the bool-value forms must be rejected; stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        errors.iter().any(|line| line.contains("Main.as:16")),
+        "the bool value without flags must be rejected; stdout={stdout:?}"
+    );
+    assert!(
+        errors.iter().any(|line| line.contains("Main.as:18")),
+        "the bool value with flags must be rejected; stdout={stdout:?}"
+    );
+    for legal_line in ["Main.as:9", "Main.as:11", "Main.as:13"] {
+        assert!(
+            !errors.iter().any(|line| line.contains(legal_line)),
+            "mutable string plus bool changed output must be accepted at {legal_line}; stdout={stdout:?}"
+        );
+    }
+}
+
 /// GH #63 regression net: `UI::InputTextCallback` (namespaced Core funcdef)
 /// end-to-end usage must stay clean — free-function / method / funcdef-handle
 /// decay into `InputTextCallback@` parameters, the ctor form, bare-handle
