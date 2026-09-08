@@ -1065,6 +1065,7 @@ fn collect_pass_diagnostics(
             type_index,
             &table_for_check,
             version,
+            snapshot.file_id_of_path(&item.path),
         ) {
             diagnostic.range =
                 diagnostics::range_to_utf8_columns(&analysis.source, diagnostic.range);

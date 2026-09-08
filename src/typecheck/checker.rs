@@ -753,6 +753,7 @@ pub struct Checker<'a> {
     /// top-level (free) function declarations in this file. Used by GH #37
     /// slice 3 to flag `DuplicateFunction` at the second and later decl.
     seen_function_sigs: std::collections::HashSet<(String, String)>,
+    file_id: Option<usize>,
     /// Scoped suppression for the `+`-mix arm of SignedUnsignedMismatch
     /// (GH #37): while walking the operands of a NON-relational arithmetic
     /// op (`*`/`&`/…), an inner Add-mix must not warn — the game only fires
@@ -795,11 +796,17 @@ impl<'a> Checker<'a> {
             span_expr_types: std::collections::HashMap::new(),
             record_types: false,
             seen_function_sigs: std::collections::HashSet::new(),
+            file_id: None,
             arith_suppress_add_mix: 0,
             used_names: None,
             local_decls: None,
             local_decl_fn_stack: Vec::new(),
         }
+    }
+
+    pub fn with_file_id(mut self, file_id: usize) -> Self {
+        self.file_id = Some(file_id);
+        self
     }
 
     /// Enable span→type recording for the query surface (GH #42).
@@ -1082,6 +1089,11 @@ impl<'a> Checker<'a> {
     /// `start..end` (identifier-shaped lookups, GH #42 stage 2).
     pub fn type_at_span_range(&self, start: u32, end: u32) -> Option<&TypeRepr> {
         self.span_expr_types.get(&(start, end))
+    }
+
+    pub fn check_file_with_id(&mut self, file: &SourceFile, file_id: usize) {
+        self.file_id = Some(file_id);
+        self.check_file(file);
     }
 
     pub fn check_file(&mut self, file: &SourceFile) {
@@ -1797,9 +1809,11 @@ impl<'a> Checker<'a> {
         if !self
             .seen_function_sigs
             .insert((qual_name.clone(), param_sig.clone()))
-            || self
-                .scope
-                .workspace_has_function_signature(&qual_name, &param_sig)
+            || self.file_id.is_some_and(|file_id| {
+                self.scope.workspace_has_prior_function_signature(
+                    &qual_name, &param_sig, file_id, func.span,
+                )
+            })
         {
             self.diagnostics.push(TypeDiagnostic {
                 span: func.span,
@@ -2981,7 +2995,11 @@ impl<'a> Checker<'a> {
                 if let Some(params) = self.scope.lookup_function_params(qualified) {
                     self.check_arg_types_against_params(display_name, args, &arg_tys, &params);
                 }
-                self.report_workspace_handle_slot_failure(qualified, args, &arg_tys, &overloads);
+                if self.scope.has_workspace_function_exact(qualified) {
+                    self.report_workspace_handle_slot_failure(
+                        qualified, args, &arg_tys, &overloads,
+                    );
+                }
                 // B089: the funcdef-slot check the external call path has had
                 // since B023. `lookup_function_params` returns the declared
                 // param TEXT, which is what `slot_funcdef` needs, but the
@@ -4524,6 +4542,12 @@ impl<'a> Checker<'a> {
         arg_tys: &[TypeRepr],
         overloads: &[OverloadSig],
     ) {
+        if self.scope.external().is_some() {
+            return;
+        }
+        if self.scope.external().is_some() {
+            return;
+        }
         let mut evidence = None;
         let mut any_compatible = false;
         for sig in overloads

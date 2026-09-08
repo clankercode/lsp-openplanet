@@ -35,7 +35,15 @@ pub fn compute_diagnostics(
     let fid = symbols.allocate_file_id();
     let file_syms = SymbolTable::extract_symbols(fid, analysis.masked_source(), &analysis.file);
     symbols.set_file_symbols(fid, file_syms);
-    compute_diagnostics_from_analysis(uri, &analysis, config, type_index, &symbols)
+    compute_diagnostics_with_versions(
+        uri,
+        &analysis,
+        config,
+        type_index,
+        &symbols,
+        None,
+        Some(fid),
+    )
 }
 
 /// Diagnostics for required plugin dependencies that were not resolved by the
@@ -83,8 +91,17 @@ pub fn compute_diagnostics_from_analysis(
     config: &LspConfig,
     type_index: Option<&TypeIndex>,
     workspace_symbols: &SymbolTable,
+    file_id: Option<usize>,
 ) -> Vec<Diagnostic> {
-    compute_diagnostics_with_versions(uri, analysis, config, type_index, workspace_symbols, None)
+    compute_diagnostics_with_versions(
+        uri,
+        analysis,
+        config,
+        type_index,
+        workspace_symbols,
+        None,
+        file_id,
+    )
 }
 
 /// [`compute_diagnostics_from_analysis`] plus GH #18 version context:
@@ -101,6 +118,7 @@ pub fn compute_diagnostics_with_versions(
     type_index: Option<&TypeIndex>,
     workspace_symbols: &SymbolTable,
     version: Option<(&crate::typedb::catalog::VersionNotes, &str)>,
+    file_id: Option<usize>,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     let source = analysis.source.as_str();
@@ -133,6 +151,9 @@ pub fn compute_diagnostics_with_versions(
 
     let scope = GlobalScope::new(workspace_symbols, type_index);
     let mut checker = Checker::new(analysis.masked_source(), &scope);
+    if let Some(file_id) = file_id {
+        checker = checker.with_file_id(file_id);
+    }
     checker.check_file(&analysis.file);
     for diag in &checker.diagnostics {
         let range = span_to_range(source, diag.span);

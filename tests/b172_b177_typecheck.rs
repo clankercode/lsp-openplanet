@@ -75,7 +75,7 @@ fn workspace_errors(files: &[(PathBuf, &str)], file: usize) -> Vec<String> {
     let parsed = &analysis.file;
     let source = analysis.masked_source();
     let scope = GlobalScope::new(snapshot.symbols(), None);
-    let mut checker = Checker::new(source, &scope);
+    let mut checker = Checker::new(source, &scope).with_file_id(file);
     checker.check_file(parsed);
     checker
         .diagnostics

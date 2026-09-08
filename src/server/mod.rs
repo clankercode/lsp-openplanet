@@ -860,6 +860,7 @@ impl Backend {
             &config,
             type_index.as_deref(),
             &symbols,
+            Some(fid),
         );
         self.client
             .publish_diagnostics(uri.clone(), diags, None)
@@ -935,6 +936,7 @@ impl Backend {
                         config,
                         type_index.as_deref(),
                         &symbols_for_check,
+                        snapshot.file_id_of(uri),
                     );
                     d.extend(inactive(analysis));
                     d
@@ -956,6 +958,7 @@ impl Backend {
                         config,
                         type_index.as_deref(),
                         &symbols,
+                        Some(fid),
                     );
                     d.extend(inactive(&analysis_owned));
                     d
@@ -1044,6 +1047,7 @@ impl Backend {
                         &config,
                         type_index.as_deref(),
                         snapshot.symbols(),
+                        snapshot.file_id_of(uri),
                     );
                     // B031: LSP-only, same as the sharded path above.
                     d.extend(diagnostics::inactive_region_diagnostics(
@@ -1072,6 +1076,7 @@ impl Backend {
                         &config,
                         type_index.as_deref(),
                         &symbols,
+                        Some(fid),
                     );
                     d.extend(diagnostics::inactive_region_diagnostics(
                         text,

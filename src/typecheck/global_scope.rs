@@ -1871,6 +1871,51 @@ impl<'a> GlobalScope<'a> {
             .unwrap_or_default()
     }
 
+    /// True when a matching declaration occurs before the declaration at
+    /// `declaration_span` in the pooled source order.
+    pub fn workspace_has_prior_function_signature(
+        &self,
+        qualified: &str,
+        param_sig: &str,
+        file_id: usize,
+        declaration_span: crate::lexer::Span,
+    ) -> bool {
+        let symbols = self.lookup_workspace(qualified);
+        let Some(current) = symbols.iter().find(|s| {
+            s.file_id == file_id
+                && s.span == declaration_span
+                && matches!(&s.kind, SymbolKind::Function { params, .. } if {
+                    let sig = params
+                        .iter()
+                        .map(|(_, ty)| ty.split_whitespace().collect::<Vec<_>>().join(" "))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    sig == param_sig
+                })
+        }) else {
+            return false;
+        };
+        self.lookup_workspace(qualified).iter().any(|s| {
+            let earlier_file = s.file_id < current.file_id;
+            let earlier_in_file = s.file_id == current.file_id && s.span.start < current.span.start;
+            (earlier_file || earlier_in_file)
+                && matches!(&s.kind, SymbolKind::Function { params, .. } if {
+                    let sig = params
+                        .iter()
+                        .map(|(_, ty)| ty.split_whitespace().collect::<Vec<_>>().join(" "))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    sig == param_sig
+                })
+        })
+    }
+
+    /// True when `qualified` has a function declaration in the workspace,
+    /// without property/tail lookup widening.
+    pub fn has_workspace_function_exact(&self, qualified: &str) -> bool {
+        !self.lookup_function_overloads_exact(qualified).is_empty()
+    }
+
     pub fn workspace_has_function_signature(&self, qualified: &str, param_sig: &str) -> bool {
         self.lookup_workspace(qualified)
             .iter()
