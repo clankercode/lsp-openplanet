@@ -173,6 +173,8 @@ pub enum TypeDiagnosticKind {
         expected: String,
         got: String,
     },
+    DataTypeVoid,
+    PrimitiveInout,
     ArgTypeMismatch {
         function_name: String,
         param_index: usize,
@@ -416,6 +418,10 @@ impl TypeDiagnostic {
                 "return type mismatch: function returns `{}`, got `{}`",
                 expected, got
             ),
+            TypeDiagnosticKind::DataTypeVoid => "Data type can't be 'void'".to_string(),
+            TypeDiagnosticKind::PrimitiveInout => {
+                "Only object types that support object handles can use &inout. Use &in or &out instead.".to_string()
+            }
             TypeDiagnosticKind::ArgTypeMismatch {
                 function_name,
                 param_index,
@@ -1788,7 +1794,13 @@ impl<'a> Checker<'a> {
             })
             .collect::<Vec<_>>()
             .join(",");
-        if !self.seen_function_sigs.insert((qual_name, param_sig)) {
+        if !self
+            .seen_function_sigs
+            .insert((qual_name.clone(), param_sig.clone()))
+            || self
+                .scope
+                .workspace_has_function_signature(&qual_name, &param_sig)
+        {
             self.diagnostics.push(TypeDiagnostic {
                 span: func.span,
                 kind: TypeDiagnosticKind::DuplicateFunction {
@@ -1825,6 +1837,12 @@ impl<'a> Checker<'a> {
         }
         for p in &func.params {
             self.warn_string_by_value_param(p);
+            if p.modifier == ParamModifier::Inout && !type_supports_handles(&p.type_expr) {
+                self.diagnostics.push(TypeDiagnostic {
+                    span: p.type_expr.span,
+                    kind: TypeDiagnosticKind::PrimitiveInout,
+                });
+            }
             let ty = self.resolve_type_expr(&p.type_expr);
             self.record_type_repr_uses(&ty);
             if let Some(name) = &p.name {
@@ -2028,7 +2046,22 @@ impl<'a> Checker<'a> {
             } else {
                 if let Some(init) = &d.init {
                     let init_ty = self.expr_type(init);
-                    self.check_init_conversion(&declared_ty, init, &init_ty);
+                    if matches!(&init_ty, TypeRepr::Named(name) if name == "dictionaryValue") {
+                        if matches!(
+                            declared_ty.unwrap_const(),
+                            TypeRepr::Primitive(PrimitiveType::Uint64)
+                        ) {
+                            self.diagnostics.push(TypeDiagnostic {
+                                span: init.span,
+                                kind: TypeDiagnosticKind::NoImplicitConversion {
+                                    from: "dictionaryValue".to_string(),
+                                    to: "uint64".to_string(),
+                                },
+                            });
+                        }
+                    } else {
+                        self.check_init_conversion(&declared_ty, init, &init_ty);
+                    }
                     self.check_funcdef_binding(&declared_ty, init, &init_ty);
                     self.check_enum_conversion(&declared_ty, init, &init_ty);
                 }
@@ -2039,11 +2072,20 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// B173: dictionaryValue conversion is handled at each value-binding
+    /// position, because its typedb proxy exposes only selected opConv forms.
     /// GH #37 slice 1: warning-parity implicit conversions in variable
     /// initializers (game-compiler WARNING classes, RemoteBuild probe
     /// 2026-08-17). Conservative silence on Error/unknown/non-primitive
     /// operands — never warn on a type we can't classify confidently.
     fn check_init_conversion(&mut self, declared: &TypeRepr, init: &Expr, init_ty: &TypeRepr) {
+        if matches!(init_ty, TypeRepr::Void) && !matches!(declared.unwrap_const(), TypeRepr::Void) {
+            self.diagnostics.push(TypeDiagnostic {
+                span: init.span,
+                kind: TypeDiagnosticKind::DataTypeVoid,
+            });
+            return;
+        }
         let target = declared.unwrap_const();
         let source = init_ty.unwrap_const();
         if target.is_error() || source.is_error() {
@@ -2283,7 +2325,10 @@ impl<'a> Checker<'a> {
     fn check_stmt(&mut self, stmt: &Stmt) {
         match &stmt.kind {
             StmtKind::Expr(e) => {
-                let _ = self.expr_type(e);
+                let ty = self.expr_type(e);
+                if matches!(ty, TypeRepr::Void) {
+                    return;
+                }
             }
             StmtKind::VarDecl(var) => self.check_var_decl_local(var),
             StmtKind::Block(stmts) => {
@@ -2354,7 +2399,28 @@ impl<'a> Checker<'a> {
             StmtKind::Return(Some(e)) => {
                 let got_ty = self.expr_type(e);
                 if let Some(expected) = self.return_type_stack.last() {
-                    if let (TypeRepr::Primitive(exp_p), TypeRepr::Primitive(got_p)) =
+                    if matches!(&got_ty, TypeRepr::Named(name) if name == "dictionaryValue")
+                        && matches!(
+                            expected.unwrap_const(),
+                            TypeRepr::Primitive(PrimitiveType::Uint64)
+                        )
+                    {
+                        self.diagnostics.push(TypeDiagnostic {
+                            span: e.span,
+                            kind: TypeDiagnosticKind::NoImplicitConversion {
+                                from: "dictionaryValue".to_string(),
+                                to: "uint64".to_string(),
+                            },
+                        });
+                    } else if matches!(expected, TypeRepr::Void) {
+                        self.diagnostics.push(TypeDiagnostic {
+                            span: e.span,
+                            kind: TypeDiagnosticKind::ReturnTypeMismatch {
+                                expected: "void".to_string(),
+                                got: got_ty.display(),
+                            },
+                        });
+                    } else if let (TypeRepr::Primitive(exp_p), TypeRepr::Primitive(got_p)) =
                         (expected, &got_ty)
                     {
                         if !is_convertible(&got_ty, expected) {
@@ -2915,6 +2981,7 @@ impl<'a> Checker<'a> {
                 if let Some(params) = self.scope.lookup_function_params(qualified) {
                     self.check_arg_types_against_params(display_name, args, &arg_tys, &params);
                 }
+                self.report_workspace_handle_slot_failure(qualified, args, &arg_tys, &overloads);
                 // B089: the funcdef-slot check the external call path has had
                 // since B023. `lookup_function_params` returns the declared
                 // param TEXT, which is what `slot_funcdef` needs, but the
@@ -4146,6 +4213,17 @@ impl<'a> Checker<'a> {
 
                     let arg_core = Self::peel_const_handle(arg_ty);
                     let param_core = Self::peel_const_handle(&param_ty);
+                    if Self::dictionary_value_to_primitive(arg_core, param_core) {
+                        let text = render_no_matching_sig(
+                            qualified_name,
+                            &self.rendered_args(args, &arg_tys),
+                        );
+                        self.diagnostics.push(TypeDiagnostic {
+                            span: arg.value.span,
+                            kind: TypeDiagnosticKind::NoMatchingSignatures { text },
+                        });
+                        continue;
+                    }
 
                     // B023: function-shaped args must actually bind a
                     // funcdef-typed param (ctor-path bind test) — a bare
@@ -4408,6 +4486,12 @@ impl<'a> Checker<'a> {
                 {
                     compatible = false;
                     evidence_span = Some(args[i].value.span);
+                    continue;
+                }
+                if Self::dictionary_value_to_primitive(arg_core, param_core) {
+                    compatible = false;
+                    evidence_span = Some(args[i].value.span);
+                    continue;
                 }
                 // Named / handle / mixed shapes stay neutral — the strict
                 // checks live on the unique-overload path.
@@ -4428,7 +4512,81 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Type every argument expression exactly once.
+    fn dictionary_value_to_primitive(arg: &TypeRepr, param: &TypeRepr) -> bool {
+        matches!(arg, TypeRepr::Named(n) if n == "dictionaryValue")
+            && matches!(param, TypeRepr::Primitive(PrimitiveType::Uint64))
+    }
+
+    fn report_workspace_handle_slot_failure(
+        &mut self,
+        qualified_name: &str,
+        args: &[CallArg],
+        arg_tys: &[TypeRepr],
+        overloads: &[OverloadSig],
+    ) {
+        let mut evidence = None;
+        let mut any_compatible = false;
+        for sig in overloads
+            .iter()
+            .filter(|sig| args.len() >= sig.min_args && args.len() <= sig.param_types.len())
+        {
+            let mut compatible = true;
+            for (index, (arg, arg_ty)) in args.iter().zip(arg_tys).enumerate() {
+                let Some(param_text) = sig.param_types.get(index) else {
+                    continue;
+                };
+                let param_ty = TypeRepr::parse_type_string(param_text);
+                if self.workspace_handle_converts(arg_ty, &param_ty) == Some(false) {
+                    compatible = false;
+                    evidence = Some(arg.value.span);
+                }
+            }
+            any_compatible |= compatible;
+        }
+        if !any_compatible {
+            if let Some(span) = evidence {
+                let text =
+                    render_no_matching_sig(qualified_name, &self.rendered_args(args, arg_tys));
+                self.diagnostics.push(TypeDiagnostic {
+                    span,
+                    kind: TypeDiagnosticKind::NoMatchingSignatures { text },
+                });
+            }
+        }
+    }
+
+    fn workspace_handle_converts(&self, arg: &TypeRepr, param: &TypeRepr) -> Option<bool> {
+        let (TypeRepr::Handle(arg), TypeRepr::Handle(param)) =
+            (arg.unwrap_const(), param.unwrap_const())
+        else {
+            return None;
+        };
+        let (TypeRepr::Named(arg), TypeRepr::Named(param)) =
+            (arg.unwrap_const(), param.unwrap_const())
+        else {
+            return None;
+        };
+        if self.named_types_equivalent(arg, param) {
+            return Some(true);
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut queue: std::collections::VecDeque<String> = self
+            .scope
+            .workspace_class_parents(arg)
+            .into_iter()
+            .collect();
+        while let Some(parent) = queue.pop_front() {
+            if !seen.insert(parent.clone()) {
+                continue;
+            }
+            if self.named_types_equivalent(&parent, param) {
+                return Some(true);
+            }
+            queue.extend(self.scope.workspace_class_parents(&parent));
+        }
+        Some(false)
+    }
+
     ///
     /// Split out because three workspace call paths need the SAME arg types
     /// for two different checks, and `expr_type` is not idempotent — it
@@ -4575,6 +4733,13 @@ impl<'a> Checker<'a> {
                     let Some(arg_ty) = arg_tys.get(i).cloned() else {
                         continue;
                     };
+                    if matches!(arg_ty, TypeRepr::Void) {
+                        self.diagnostics.push(TypeDiagnostic {
+                            span: arg.value.span,
+                            kind: TypeDiagnosticKind::DataTypeVoid,
+                        });
+                        continue;
+                    }
                     let Some((_, param_text)) = params.get(param_index) else {
                         continue;
                     };
@@ -5875,7 +6040,12 @@ impl<'a> Checker<'a> {
                     }
                     return elem.clone();
                 }
-                // Dictionary-like and everything else: stay silent.
+                // Dictionary indexing returns the typedb's dictionaryValue
+                // proxy; its opConv set is checked at binding sites.
+                if obj_ty.is_dictionary_like() {
+                    return TypeRepr::Named("dictionaryValue".to_string());
+                }
+                // Everything else: stay silent.
                 TypeRepr::Error(String::new())
             }
             ExprKind::Cast {
@@ -6580,7 +6750,17 @@ fn resolve_overload<'a>(overloads: &'a [OverloadSig], arg_tys: &[TypeRepr]) -> O
     }
 }
 
-/// True when `ty` is bare `string` or `const string` (by value), not a
+fn type_supports_handles(ty: &TypeExpr) -> bool {
+    match &ty.kind {
+        TypeExprKind::Primitive(_) => false,
+        TypeExprKind::Handle(_) | TypeExprKind::Named(_) | TypeExprKind::Template(_, _) => true,
+        TypeExprKind::Const(inner) | TypeExprKind::Reference(inner, _) => {
+            type_supports_handles(inner)
+        }
+        TypeExprKind::Array(_) | TypeExprKind::Auto | TypeExprKind::Error => false,
+    }
+}
+
 /// reference/handle/array/template wrapping of string.
 fn is_string_by_value_type(ty: &TypeExpr) -> bool {
     match &ty.kind {

@@ -1871,7 +1871,24 @@ impl<'a> GlobalScope<'a> {
             .unwrap_or_default()
     }
 
-    /// Look up the declared base types of a workspace class or interface by
+    pub fn workspace_has_function_signature(&self, qualified: &str, param_sig: &str) -> bool {
+        self.lookup_workspace(qualified)
+            .iter()
+            .filter(|s| {
+                let SymbolKind::Function { params, .. } = &s.kind else {
+                    return false;
+                };
+                let sig = params
+                    .iter()
+                    .map(|(_, ty)| ty.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                sig == param_sig
+            })
+            .count()
+            > 1
+    }
+
     /// fully qualified name. Returns an empty vec if no workspace type with
     /// that name exists, or it has no bases. Only consults
     /// the workspace symbol table — external (typedb) types use their
