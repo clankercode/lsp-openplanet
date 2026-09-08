@@ -44,3 +44,5 @@ Silent. `openplanet-lsp check` on the full E++ tree accepted the file.
 
 ## Notes
 Sibling of the call-site miss: assigning that void call to a typed local (`uint64 fn = Dev_FindPatternCached(pat)`) is a separate game error (`Data type can't be 'void'`).
+
+Decision: serialize B172-B177 in one lane because they share typecheck checker/call-site/resolver and fixtures; B179 uses completion files in a separate lane; B181 uses typedb/signature fixtures in a separate lane. Independent lanes may proceed in parallel.
