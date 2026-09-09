@@ -72,3 +72,5 @@ shapes alone are handled correctly. Repro command:
 
 Suggested check regardless of B183: enum-to-int implicit conversion at builtin
 parameter slots, and wstring-to-string at builtin parameter slots.
+
+Decision: serialize after B182 in the typecheck lane because both affect checker compatibility rules; retain B183 duplicate-root coverage as an integration regression.
