@@ -1,15 +1,18 @@
 ---
+claimed_at: "2026-09-09T03:09:14Z"
+claimed_by: cli-user
+completed_at: null
 complexity: medium
 created_at: "2026-09-08T23:56:53Z"
 depends_on: []
 estimate_hours: 2
 id: B182
 priority: high
-status: pending
-tags:
-    - false-positive
+started_at: "2026-09-09T03:09:14Z"
+status: in_progress
+tags: []
 title: 'False positive: array parameters rejected for &inout (Only object types that support object handles can use &inout)'
-updated_at: "2026-09-08T23:56:53Z"
+updated_at: "2026-09-09T03:09:14Z"
 ---
 False positive: the game compiler accepts `&inout` on script array parameters; openplanet-lsp rejects them.
 
