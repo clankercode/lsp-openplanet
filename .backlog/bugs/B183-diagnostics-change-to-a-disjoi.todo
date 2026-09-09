@@ -59,3 +59,5 @@ disjoint set, and a duplicate plugin id across roots should probably be deduped
 (prefer the checked source) or warned about.
 
 Env: openplanet-lsp type db op=1.29.14 (next, Public, 6fd4200f); host xsm; 2026-09-09.
+
+Decision: separate B183 workspace deduplication lane from B182/B184 type compatibility lane; verify both single-root and duplicate-root diagnostics after merge.
