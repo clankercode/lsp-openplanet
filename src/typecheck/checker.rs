@@ -6733,6 +6733,16 @@ fn resolve_overload<'a>(overloads: &'a [OverloadSig], arg_tys: &[TypeRepr]) -> O
             let Some(param_p) = PrimitiveType::from_name(param_text.trim()) else {
                 continue;
             };
+            if matches!(arg_ty, TypeRepr::Named(name) if param_p == PrimitiveType::String && name == "wstring")
+            {
+                score += 1;
+                continue;
+            }
+            if matches!(arg_ty, TypeRepr::Named(name) if param_p == PrimitiveType::Int && is_enum_name(name))
+            {
+                score += 1;
+                continue;
+            }
             if matches!(arg_ty, TypeRepr::Error(_)) {
                 continue;
             }
@@ -6774,6 +6784,11 @@ fn resolve_overload<'a>(overloads: &'a [OverloadSig], arg_tys: &[TypeRepr]) -> O
     }
 }
 
+fn is_enum_name(name: &str) -> bool {
+    let short = name.rsplit("::").next().unwrap_or(name);
+    short.starts_with('E') || short.ends_with("Flags")
+}
+
 fn type_supports_handles(ty: &TypeExpr) -> bool {
     match &ty.kind {
         TypeExprKind::Primitive(_) => false,
@@ -6781,7 +6796,8 @@ fn type_supports_handles(ty: &TypeExpr) -> bool {
         TypeExprKind::Const(inner) | TypeExprKind::Reference(inner, _) => {
             type_supports_handles(inner)
         }
-        TypeExprKind::Array(_) | TypeExprKind::Auto | TypeExprKind::Error => false,
+        TypeExprKind::Array(_) | TypeExprKind::Auto => true,
+        TypeExprKind::Error => false,
     }
 }
 
@@ -9765,6 +9781,60 @@ void Main() {
     }
 
     // ── B007: distinct enum types at external call sites ─────────────────
+
+    #[test]
+    fn arrays_support_inout_but_value_primitives_do_not() {
+        for source in [
+            "void Good(int[] &inout value) {}\nvoid Bad(int &inout value) {}",
+            "void Good(string[] &inout value) {}\nvoid Bad(float &inout value) {}",
+            "void Good(array<int> &inout value) {}\nvoid Bad(int64 &inout value) {}",
+        ] {
+            let diagnostics = check(source);
+            assert_eq!(
+                diagnostics
+                    .iter()
+                    .filter(|d| matches!(d.kind, TypeDiagnosticKind::PrimitiveInout))
+                    .count(),
+                1,
+                "{source}: {diagnostics:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_overload_scoring_accepts_enum_to_int_and_wstring_to_string() {
+        let overloads = vec![
+            OverloadSig {
+                param_names: vec![Some("value".into())],
+                param_types: vec!["int".into()],
+                param_out: vec![false],
+                param_modes: vec![ParamMode::Value],
+                min_args: 1,
+                return_type: "bool".into(),
+            },
+            OverloadSig {
+                param_names: vec![Some("value".into())],
+                param_types: vec!["string".into()],
+                param_out: vec![false],
+                param_modes: vec![ParamMode::Value],
+                min_args: 1,
+                return_type: "string".into(),
+            },
+        ];
+        assert!(matches!(
+            resolve_overload(
+                &overloads[..1],
+                &[TypeRepr::Named("UI::WindowFlags".into())]
+            ),
+            OverloadMatch::Unique(_)
+        ));
+        assert!(matches!(
+            resolve_overload(&overloads[1..], &[TypeRepr::Named("wstring".into())]),
+            OverloadMatch::Unique(_)
+        ));
+        assert!(is_enum_name("UI::WindowFlags"));
+        assert!(!is_enum_name("Widget"));
+    }
 
     #[test]
     fn is_convertible_distinct_named_enums_false() {
