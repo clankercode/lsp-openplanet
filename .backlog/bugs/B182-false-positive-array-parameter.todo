@@ -61,3 +61,5 @@ that genuinely do not support handles (primitives, `vec3`, etc).
 
 Found while checking tm-editor-plus-plus; blocks its `build.sh` (which gates on
 `openplanet-lsp check`) and forced an `EPP_SKIP_LSP=1` bypass.
+
+Decision: serialize B182 with B184 because both change call/type compatibility behavior in checker and share regression fixtures; B183 runs as a separate workspace-discovery lane, then integration verification follows both.
