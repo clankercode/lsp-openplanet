@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-09-09T03:09:14Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-09-09T03:23:02Z"
 complexity: medium
 created_at: "2026-09-08T23:57:30Z"
 depends_on: []
+duration_minutes: 13.81628120655
 estimate_hours: 2
 id: B184
 priority: high
 started_at: "2026-09-09T03:09:14Z"
-status: in_progress
+status: done
 tags: []
 title: 'False positives: UI::BeginChild / UI::InputTextMultiline overload resolution (bare enum to int, wstring to string)'
-updated_at: "2026-09-09T03:09:14Z"
+updated_at: "2026-09-09T03:23:02Z"
 ---
 Three `No matching signatures` errors against builtin `UI::` functions, all of which
 the game compiler accepts. They only surface in the duplicated-plugins-dir

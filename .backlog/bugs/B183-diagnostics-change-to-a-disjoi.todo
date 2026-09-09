@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-09-09T03:09:14Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-09-09T03:23:02Z"
 complexity: high
 created_at: "2026-09-08T23:57:09Z"
 depends_on: []
+duration_minutes: 13.816252013933333
 estimate_hours: 3
 id: B183
 priority: high
 started_at: "2026-09-09T03:09:14Z"
-status: in_progress
+status: done
 tags: []
 title: Diagnostics change to a disjoint set when the same plugin is found under two --plugins-dir roots
-updated_at: "2026-09-09T03:09:14Z"
+updated_at: "2026-09-09T03:23:02Z"
 ---
 When the same plugin is discoverable through two `--plugins-dir` roots (a staged copy
 plus its source checkout), `check` produces a completely different — and disjoint —
