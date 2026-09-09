@@ -495,6 +495,19 @@ struct DepLoad {
     incomplete_export_surfaces: Vec<(String, Vec<String>)>,
 }
 
+fn plugin_identity(manifest: &Manifest, fallback: &str) -> Option<String> {
+    if let Some(siteid) = manifest.meta.siteid {
+        return Some(format!("siteid:{siteid}"));
+    }
+    manifest
+        .script
+        .as_ref()
+        .and_then(|script| script.module.as_deref())
+        .or(manifest.meta.name.as_deref())
+        .or_else(|| (!fallback.is_empty()).then_some(fallback))
+        .map(str::to_ascii_lowercase)
+}
+
 fn load_dependency_exports(
     root: &Path,
     plugins_dirs: &[PathBuf],
@@ -515,7 +528,13 @@ fn load_dependency_exports(
     };
 
     let mut seen_ids = HashSet::new();
+    let mut seen_plugin_identities = HashSet::new();
     let mut seen_files = HashSet::new();
+    // The checked plugin already owns this identity. A staged copy found in a
+    // dependency root must not shadow its symbols or diagnostics.
+    if let Some(identity) = plugin_identity(&manifest, "") {
+        seen_plugin_identities.insert(identity);
+    }
 
     // Required: dependencies + export_dependencies. A resolved dep's own
     // `export_dependencies` are enqueued so nested exports walk transitively
@@ -546,6 +565,12 @@ fn load_dependency_exports(
         }
         match resolve_in_dirs(&dep_id, plugins_dirs, plugin_files_search_paths) {
             Some(resolved) => {
+                let Some(identity) = plugin_identity(&resolved.manifest, &dep_id) else {
+                    continue;
+                };
+                if !seen_plugin_identities.insert(identity) {
+                    continue;
+                }
                 if !resolved.unloaded_exports.is_empty() {
                     result
                         .incomplete_export_surfaces
@@ -658,7 +683,43 @@ mod tests {
         base
     }
 
-    /// GH #60: `honor_gitignore` rides the config ladder into the shared
+    #[test]
+    fn plugin_identity_prefers_siteid_and_keeps_distinct_plugins() {
+        let first = Manifest::parse("[meta]\nname = \"Editor\"\nsiteid = 377\n").unwrap();
+        let staged = Manifest::parse("[meta]\nname = \"Editor copy\"\nsiteid = 377\n").unwrap();
+        let other = Manifest::parse("[meta]\nname = \"Other\"\nsiteid = 378\n").unwrap();
+
+        assert_eq!(
+            plugin_identity(&first, "fallback").as_deref(),
+            Some("siteid:377")
+        );
+        assert_eq!(
+            plugin_identity(&first, "fallback"),
+            plugin_identity(&staged, "fallback")
+        );
+        assert_ne!(
+            plugin_identity(&first, "fallback"),
+            plugin_identity(&other, "fallback")
+        );
+    }
+
+    #[test]
+    fn plugin_identity_falls_back_to_module_then_name() {
+        let module =
+            Manifest::parse("[meta]\nname = \"Display Name\"\n[script]\nmodule = \"ModuleId\"\n")
+                .unwrap();
+        let name = Manifest::parse("[meta]\nname = \"Display Name\"\n").unwrap();
+
+        assert_eq!(
+            plugin_identity(&module, "fallback").as_deref(),
+            Some("moduleid")
+        );
+        assert_eq!(
+            plugin_identity(&name, "fallback").as_deref(),
+            Some("display name")
+        );
+    }
+
     /// discovery seam. This is the LSP server's exact path — the Backend
     /// builds its search with `with_defaults().finalize_with_config(...)`, so
     /// server and CLI cannot diverge on which files get checked.
