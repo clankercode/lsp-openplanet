@@ -174,6 +174,10 @@ pub enum TypeDiagnosticKind {
         got: String,
     },
     DataTypeVoid,
+    /// AngelScript exposes `throw` as a function that requires an exception
+    /// value. A bare `throw;` is a C++-style rethrow and the game rejects it
+    /// as an ambiguous expression.
+    BareThrow,
     PrimitiveInout,
     ArgTypeMismatch {
         function_name: String,
@@ -204,7 +208,9 @@ pub enum TypeDiagnosticKind {
     /// Game parity: unary `!` is bool-only in AngelScript. Applying it to a
     /// handle, class instance, or other non-bool operand fails in-game with
     /// "Illegal operation on this datatype" (OP 1.29.5, tm-control-mcp
-    /// AsyncDispatch.as:136 — `!result.Get("success", false)`).
+    /// AsyncDispatch.as:136 — `!result.Get("success", false)`). Unary
+    /// operators backed by missing engine methods use this same diagnostic
+    /// kind, for example `-vec3` when `vec3` has no `opNeg` method.
     IllegalUnaryOperand {
         op: String,
         operand_type: String,
@@ -419,6 +425,9 @@ impl TypeDiagnostic {
                 expected, got
             ),
             TypeDiagnosticKind::DataTypeVoid => "Data type can't be 'void'".to_string(),
+            TypeDiagnosticKind::BareThrow => {
+                "bare `throw` is invalid; throw an exception value instead".to_string()
+            }
             TypeDiagnosticKind::PrimitiveInout => {
                 "Only object types that support object handles can use &inout. Use &in or &out instead.".to_string()
             }
@@ -2299,6 +2308,31 @@ impl<'a> Checker<'a> {
         });
     }
 
+    /// GH #70: reject named engine value constructors that have no matching
+    /// typedb behavior. The typedb's `ctor_conversions` list is the complete
+    /// single-argument conversion surface for Core value types.
+    fn check_external_value_ctor(&mut self, target: &TypeRepr, arg_tys: &[TypeRepr], span: Span) {
+        let (TypeRepr::Named(target_name), [arg_ty]) = (target, arg_tys) else {
+            return;
+        };
+        let TypeRepr::Named(source_name) = arg_ty.unwrap_const() else {
+            return;
+        };
+        if source_name == target_name
+            || !self.scope.is_external_type(source_name)
+            || !self.scope.is_external_type(target_name)
+            || self.scope.external_ctor_converts(source_name, target_name)
+        {
+            return;
+        }
+        self.diagnostics.push(TypeDiagnostic {
+            span,
+            kind: TypeDiagnosticKind::NoMatchingSignatures {
+                text: format!("{target_name}(const {source_name}&)"),
+            },
+        });
+    }
+
     /// GH #49 constructor form: the int/nat vector families have NO
     /// cross-type constructor — `int3(nat3_value)` is rejected by the game
     /// with `No matching signatures to 'int3(const nat3&)'`. Narrow rule,
@@ -2339,6 +2373,16 @@ impl<'a> Checker<'a> {
     fn check_stmt(&mut self, stmt: &Stmt) {
         match &stmt.kind {
             StmtKind::Expr(e) => {
+                // AngelScript exposes `throw` as a value-taking builtin. A
+                // standalone `throw;` is a C++-style rethrow that the game
+                // rejects, so diagnose it before ordinary identifier lookup.
+                if matches!(&e.kind, ExprKind::Ident(name) if name.text(self.source) == "throw") {
+                    self.diagnostics.push(TypeDiagnostic {
+                        span: e.span,
+                        kind: TypeDiagnosticKind::BareThrow,
+                    });
+                    return;
+                }
                 let ty = self.expr_type(e);
                 if matches!(ty, TypeRepr::Void) {
                     return;
@@ -4901,12 +4945,25 @@ impl<'a> Checker<'a> {
                     for a in args {
                         arg_tys.push(self.expr_type(&a.value));
                     }
-                    // GH #49: `int3(nat3_value)` matches no constructor.
-                    self.check_math_value_ctor(
+                    // GH #70: use the typedb behavior set for constructor
+                    // calls parsed as identifier callees as well as `Type(...)`
+                    // expressions.
+                    self.check_external_value_ctor(
                         &TypeRepr::Named(name.clone()),
                         &arg_tys,
                         callee.span,
                     );
+                    // GH #49: `int3(nat3_value)` matches no constructor.
+                    // The typedb-backed rule above covers this family too;
+                    // keep the specialized check only for legacy typedb-less
+                    // checks where constructor metadata is unavailable.
+                    if self.scope.external().is_none() {
+                        self.check_math_value_ctor(
+                            &TypeRepr::Named(name.clone()),
+                            &arg_tys,
+                            callee.span,
+                        );
+                    }
                     return TypeRepr::Named(name);
                 }
                 if let Some(resolved) = self.scope.resolve_unqualified(&name) {
@@ -5894,19 +5951,12 @@ impl<'a> Checker<'a> {
                 // granularity probes 2026-08-17): `Signed/Unsigned mismatch`
                 // fires in exactly two situations:
                 //
-                //  a) A relational op `<`/`<=`/`>`/`>=` (NOT `==`/`!=`)
+                //  a) A relational or equality op `<`/`<=`/`>`/`>=`/`==`/`!=`
                 //     directly compares a pure signed int with a pure
-                //     unsigned int, and neither operand subtree contains an
-                //     integer literal (`n > 0` and `0 < n` are silent).
-                //     Warning span covers the whole comparison.
+                //     unsigned int with no integer literal in either subtree.
                 //  b) A `+` add directly mixes a pure signed int with a pure
-                //     unsigned int with NO integer literal in either direct
-                //     operand and no *chained* arithmetic sibling
-                //     (`(i + u) * 2` and `(i + 1) + u` are silent — only the
-                //     topmost mix warns). The warning lives at the `+`
-                //     regardless of any outer comparison partner
-                //     (`i + u < j` warns; `(i + u) > 0` warns at the `+`,
-                //     not the `>`). `-`, `*`, `&` mixes are exempt.
+                //     unsigned int with no integer literal in the mix subtree
+                //     and no enclosing arithmetic op.
                 //
                 // Peel Const; stay silent on Error/unknown/non-primitive.
                 // The mix check runs BEFORE walking operands so a chained
@@ -5958,11 +6008,15 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
-                    BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq => {
-                        // Game probe (signmap, 2026-08-18): explicit
-                        // conversions exempt the mix — `u < int(E::LAST)`
-                        // and `u < int(3)` are silent; only var-vs-var
-                        // mixes warn.
+                    BinOp::Lt
+                    | BinOp::LtEq
+                    | BinOp::Gt
+                    | BinOp::GtEq
+                    | BinOp::Eq
+                    | BinOp::NotEq => {
+                        // Equality follows the same signed/unsigned warning
+                        // parity as the relational operators in the game.
+                        // Integer literals remain the neutral control case.
                         if !subtree_has_int_literal(lhs)
                             && !subtree_has_int_literal(rhs)
                             && !subtree_has_conversion(lhs)
@@ -6010,6 +6064,27 @@ impl<'a> Checker<'a> {
                 // (OP 1.29.5; tm-control-mcp AsyncDispatch.as:136).
                 // Skip Error operands (already diagnosed upstream) and
                 // unknown/workspace types we can't classify confidently.
+                if matches!(op, UnaryOp::Neg) && !operand_ty.is_error() {
+                    let TypeRepr::Named(name) = operand_ty.unwrap_const() else {
+                        return operand_ty.clone();
+                    };
+                    if is_math_value_type(name)
+                        && self.scope.is_external_type(name)
+                        && self
+                            .scope
+                            .lookup_external_method_param_overloads(name, "opNeg")
+                            .is_none()
+                    {
+                        self.diagnostics.push(TypeDiagnostic {
+                            span: expr.span,
+                            kind: TypeDiagnosticKind::IllegalUnaryOperand {
+                                op: "-".into(),
+                                operand_type: name.clone(),
+                            },
+                        });
+                    }
+                    return operand_ty;
+                }
                 if matches!(op, UnaryOp::Not) && !operand_ty.is_error() {
                     // Strip `const` (and handle) wrappers: `!` on a
                     // `const bool` constant is legal (E++ uses
@@ -6103,7 +6178,10 @@ impl<'a> Checker<'a> {
                 for a in args {
                     arg_tys.push(self.expr_type(a));
                 }
-                self.check_math_value_ctor(&target, &arg_tys, expr.span);
+                self.check_external_value_ctor(&target, &arg_tys, expr.span);
+                if self.scope.external().is_none() {
+                    self.check_math_value_ctor(&target, &arg_tys, expr.span);
+                }
                 if target.is_error() {
                     TypeRepr::Error(String::new())
                 } else {
@@ -9015,6 +9093,21 @@ void Main() {
         );
     }
 
+    /// GH #70: a value-type constructor must use the typedb's registered
+    /// single-argument conversion set. `mat3(quat)` has no such constructor;
+    /// `quat(mat3)` is the legal counterpart.
+    #[test]
+    fn external_value_ctor_without_registered_conversion_fires() {
+        let diags = check_with_typedb(
+            "void f() { mat3 bad = mat3(quat(1, 2, 3, 4)); quat good = quat(mat3()); }",
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::NoMatchingSignatures { text } if text == "mat3(const quat&)"))
+            .collect();
+        assert_eq!(bad.len(), 1, "expected only mat3(quat) to fail: {diags:?}");
+    }
+
     /// GH #54: `mat4` registers `mat4(const mat3&in)`, so AngelScript
     /// converts the argument by constructing the parameter's value type.
     /// The relation is symmetric (`mat3(const mat4&in)` exists too).
@@ -10726,6 +10819,25 @@ void Main() {
     // game rejects with "Illegal operation on this datatype" (OP 1.29.5,
     // AsyncDispatch.as:136 `!result.Get("success", false)`).
     #[test]
+    fn unary_neg_on_engine_value_requires_operator() {
+        let diags = check_with_typedb(
+            "void Use(vec3 value) { vec3 bad = -value; vec3 good = value * -1.0; }",
+        );
+        assert_eq!(
+            diags
+                .iter()
+                .filter(|d| matches!(
+                    &d.kind,
+                    TypeDiagnosticKind::IllegalUnaryOperand { op, operand_type }
+                        if op == "-" && operand_type == "vec3"
+                ))
+                .count(),
+            1,
+            "only unary negation should fail; multiplication is legal: {diags:?}"
+        );
+    }
+
+    #[test]
     fn unary_not_on_handle_is_diagnosed() {
         let diags = check(
             r#"
@@ -11003,10 +11115,46 @@ void Main() {
     }
 
     #[test]
+    fn sum_equality_mixed_warns() {
+        // Openplanet warns for both equality operators when signed and
+        // unsigned integer variables are compared.
+        for op in ["==", "!="] {
+            let source = format!("void f() {{ int i = 1; uint u = 2; bool b = i {op} u; }}");
+            let diags = sum_diags(&source);
+            assert_eq!(diags.len(), 1, "op `{op}` must warn, got {diags:?}");
+        }
+    }
+
+    #[test]
+    fn sum_equality_mixed_engine_property_warns() {
+        // GH #68's reported shape: `string.Length` is a signed engine
+        // property compared with an unsigned variable. Both equality
+        // operators must retain the warning through typedb member lookup.
+        let diags = check_with_typedb(
+            "void f() { string s = \"abc\"; uint n = 3; bool eq = s.Length == n; bool ne = s.Length != n; }",
+        );
+        assert_eq!(
+            diags
+                .iter()
+                .filter(|d| matches!(d.kind, TypeDiagnosticKind::SignedUnsignedMismatch))
+                .count(),
+            2,
+            "GH #68 property comparisons must warn for == and !=: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn sum_equality_mixed_literal_stays_silent() {
+        assert_sum_silent("void f() { int i = 1; uint u = 2; bool b = i == 0; }");
+        assert_sum_silent("void f() { int i = 1; uint u = 2; bool b = 0 != u; }");
+    }
+
+    #[test]
     fn sum_equality_mixed_silent() {
-        // Cell: `int i; uint u; i == u` → SILENT (equality, not relational).
-        assert_sum_silent("void f() { int i = 1; uint u = 2; bool b = i == u; }");
-        assert_sum_silent("void f() { int i = 1; uint u = 2; bool b = i != u; }");
+        // Equality with a literal stays silent; equality between variables is
+        // covered by `sum_equality_mixed_warns` above.
+        assert_sum_silent("void f() { uint n = 1; bool b = n == 0; }");
+        assert_sum_silent("void f() { uint n = 1; bool b = 0 != n; }");
     }
 
     #[test]

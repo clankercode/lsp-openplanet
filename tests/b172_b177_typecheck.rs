@@ -36,6 +36,30 @@ fn errors_except_duplicates(source: &str) -> Vec<String> {
         .collect()
 }
 
+fn diagnostics_with_typedb(source: &str) -> Vec<openplanet_lsp::typecheck::TypeDiagnostic> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+    let typedb = TypeIndex::load(
+        &root.join("OpenplanetCore.json"),
+        &root.join("OpenplanetNext.json"),
+    )
+    .unwrap();
+    let analysis = DocumentAnalysis::analyze(source, &LspConfig::default().defines);
+    let mut symbols = openplanet_lsp::symbols::SymbolTable::new();
+    let fid = symbols.allocate_file_id();
+    symbols.set_file_symbols(
+        fid,
+        openplanet_lsp::symbols::SymbolTable::extract_symbols(
+            fid,
+            analysis.masked_source(),
+            &analysis.file,
+        ),
+    );
+    let scope = GlobalScope::new(&symbols, Some(&typedb));
+    let mut checker = Checker::new(analysis.masked_source(), &scope);
+    checker.check_file(&analysis.file);
+    checker.diagnostics
+}
+
 fn errors_with_typedb(source: &str) -> Vec<String> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
     let typedb = TypeIndex::load(
@@ -188,6 +212,64 @@ fn b176_rejects_non_convertible_handles_but_accepts_upcasts_and_explicit_casts()
             .count(),
         1,
         "the incompatible handle is the only Count call that should fail: {messages:?}"
+    );
+}
+
+#[test]
+fn b182_rejects_bare_throw_but_accepts_throwing_a_value() {
+    let source = "void Bad() { try { throw(\"original\"); } catch { throw; } }\n\
+                   void Good() { throw(\"explicit\"); }";
+    let diagnostics = diagnostics_with_typedb(source);
+    let bare_throw: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.message().contains("bare `throw`"))
+        .collect();
+    let bare_start = source.find("throw;").unwrap() as u32;
+    assert_eq!(
+        bare_throw.len(),
+        1,
+        "bare rethrow must be diagnosed exactly once: {diagnostics:?}"
+    );
+    assert!(
+        bare_throw[0].span.start <= bare_start && bare_start < bare_throw[0].span.end,
+        "bare rethrow diagnostic must cover `throw`: {:?}",
+        bare_throw[0].span
+    );
+    let explicit_start = source.find("throw(\"explicit\")").unwrap() as u32;
+    let explicit_end = explicit_start + "throw(\"explicit\")".len() as u32;
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| { d.span.end <= explicit_start || explicit_end <= d.span.start }),
+        "explicit throw(value) must remain legal: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn b183_rejects_unregistered_unary_negation_but_keeps_numeric_negation_legal() {
+    let source = "void Use(vec3 value) { vec3 bad = -value; int i = -1; float f = -1.0; }";
+    let diagnostics = diagnostics_with_typedb(source);
+    let neg_start = source.find("-value").unwrap() as u32;
+    let illegal: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.message().contains("illegal operation `- vec3`"))
+        .collect();
+    assert_eq!(
+        illegal.len(),
+        1,
+        "-vec3 must be diagnosed exactly once: {diagnostics:?}"
+    );
+    assert!(
+        illegal[0].span.start <= neg_start + 1 && neg_start < illegal[0].span.end,
+        "unary-negation diagnostic must cover the operand: {:?}",
+        illegal[0].span
+    );
+    assert!(
+        diagnostics.iter().all(|d| {
+            !d.message().contains("illegal operation `- int`")
+                && !d.message().contains("illegal operation `- float`")
+        }),
+        "numeric negation controls must stay clean: {diagnostics:?}"
     );
 }
 

@@ -13,12 +13,36 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-15
+
+### Added
+- **Top-level engine completion coverage** (B178/B179) — bare engine
+  functions and engine types are now offered at identifier positions.
+- **Current Openplanet overload coverage** — CLI regressions cover the
+  `Text::Format`, `Dev::Write`, `UI::BeginTabItem`, and `UI::InputText`
+  overloads used by current plugins.
+
 ### Fixed
-- **Top-level engine functions complete at identifier positions** (B178) —
-  `getExceptionInfo`, `print`, `startnew`, `sleep`, `yield`, `throw` and the
-  rest of the engine's bare-named functions had no completion producer at
-  all; only the engine's namespaces were offered, while hover resolved the
-  same calls from the same typedb.
+- **Compiler parity for B172–B177 and B181–B184** — corrected void-return
+  diagnostics, dictionary conversions, duplicate declarations, handle
+  compatibility, primitive `&inout`, `InputText` changed-output overloads,
+  duplicate plugin identity loading, and dependency-export diagnostics.
+- **Bare C++ rethrows** — `throw;` now reports a targeted diagnostic matching
+  Openplanet's ambiguous-expression rejection while `throw(value)` remains
+  valid.
+- **Typedb-backed value operations** — unsupported constructors such as
+  `mat3(quat)` and unary negation such as `-vec3` are diagnosed from registered
+  engine behavior metadata.
+- **Signed/unsigned equality warnings** — mixed `==` and `!=` comparisons now
+  match the game's warning behavior, with literal and explicit-conversion
+  controls preserved.
+- **Source and dependency discovery** — newly created source files are checked
+  in one-shot CLI runs, and declared dependency exports remain distinguishable
+  from undeclared or missing exports.
+
+### Distribution
+- The `v0.8.0` tag drives the GitHub Release, npm platform packages, npm
+  launcher, and crates.io publication workflow.
 
 ## [0.7.0] - 2026-09-01
 

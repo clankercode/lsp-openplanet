@@ -989,6 +989,177 @@ void Main() {}
 }
 
 #[test]
+fn check_command_validates_current_engine_overload_regressions() {
+    let root = make_temp_plugin("current-engine-overload-regressions");
+    fs::write(
+        root.join("src/Main.as"),
+        r#"
+void Main() {
+    float amount = 1.0;
+    uint count = 2;
+    uint64 address = 0;
+    bool changed = false;
+    string tab = "tab";
+    int flags = 0;
+
+    Text::Format("%.1f", amount);
+    Text::Format("%u", count);
+    Dev::Write(address, address);
+    UI::BeginTabItem(tab, flags);
+    UI::InputText("label", tab, changed);
+}
+"#,
+    )
+    .unwrap();
+
+    let typedb = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .arg("check")
+        .arg("--typedb-dir")
+        .arg(typedb)
+        .arg(&root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("0 diagnostics"),
+        "current engine overloads from GH #65-#67 must stay clean; stdout={stdout:?} stderr={stderr:?}"
+    );
+}
+
+#[test]
+fn check_command_reports_missing_symbols_in_newly_created_sources() {
+    let root = make_temp_plugin("newly-created-source");
+    fs::write(
+        root.join("src/Main.as"),
+        "namespace Foo { void Existing() {} }\nvoid Main() {}\n",
+    )
+    .unwrap();
+    // Create the file immediately before the one-shot check. This models the
+    // reported workflow and exercises namespace-member discovery from a new
+    // source file.
+    fs::write(
+        root.join("src/Foo_Test.as"),
+        "void Test() { Foo::Existing(); Foo::MissingFromNewFile(); }\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .arg("check")
+        .arg("--no-typedb")
+        .arg("--no-gitignore")
+        .arg(&root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let missing: Vec<_> = stdout
+        .lines()
+        .filter(|line| line.contains("No matching symbol 'Foo::MissingFromNewFile'"))
+        .collect();
+    assert_eq!(
+        missing.len(),
+        1,
+        "newly created namespace source must produce one missing-member diagnostic; stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        stdout.contains("src/Foo_Test.as")
+            && !stdout.contains("No matching symbol 'Foo::Existing'"),
+        "newly created source must be checked while its legal namespace call stays clean; stdout={stdout:?} stderr={stderr:?}"
+    );
+}
+
+#[test]
+fn check_command_does_not_resolve_exports_from_an_undeclared_dependency() {
+    let base = TempDir::new("openplanet-lsp-undeclared-dep");
+    fs::create_dir_all(base.join("plugins/camera/src")).unwrap();
+    fs::create_dir_all(base.join("consumer/src")).unwrap();
+    fs::write(
+        base.join("plugins/camera/info.toml"),
+        "[meta]\nname = \"Camera\"\nversion = \"0.1.0\"\n\n[script]\nmodule = \"Camera\"\nexports = [\"Export.as\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        base.join("plugins/camera/src/Export.as"),
+        "namespace Camera { import int ToScreen(int value) from \"Camera\"; }\n",
+    )
+    .unwrap();
+    fs::write(
+        base.join("consumer/info.toml"),
+        "[meta]\nname = \"Consumer\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::write(
+        base.join("consumer/src/Main.as"),
+        "namespace Camera { void Local() {} }\nvoid Main() { Camera::ToScreen(1); }\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .arg("check")
+        .arg("--no-typedb")
+        .arg("--plugins-dir")
+        .arg(base.join("plugins"))
+        .arg(base.join("consumer"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let missing_to_screen: Vec<_> = stdout
+        .lines()
+        .filter(|line| line.contains("No matching symbol 'Camera::ToScreen'"))
+        .collect();
+    assert_eq!(
+        missing_to_screen.len(),
+        1,
+        "the local authoritative namespace must reject the undeclared dependency export; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn check_command_resolves_declared_export_and_rejects_missing_export_member() {
+    let base = TempDir::new("openplanet-lsp-declared-dep");
+    fs::create_dir_all(base.join("plugins/camera/src")).unwrap();
+    fs::create_dir_all(base.join("consumer/src")).unwrap();
+    fs::write(
+        base.join("plugins/camera/info.toml"),
+        "[meta]\nname = \"Camera\"\nversion = \"0.1.0\"\n\n[script]\nmodule = \"Camera\"\nexports = [\"Export.as\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        base.join("plugins/camera/src/Export.as"),
+        "namespace Camera { import int ToScreen(int value) from \"Camera\"; }\n",
+    )
+    .unwrap();
+    fs::write(
+        base.join("consumer/info.toml"),
+        "[meta]\nname = \"Consumer\"\nversion = \"0.1.0\"\n\n[script]\ndependencies = [\"Camera\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        base.join("consumer/src/Main.as"),
+        "void Main() { Camera::ToScreen(1); Camera::Missing(1); }\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .arg("check")
+        .arg("--no-typedb")
+        .arg("--plugins-dir")
+        .arg(base.join("plugins"))
+        .arg(base.join("consumer"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !output.status.success()
+            && stdout.contains("No matching symbol 'Camera::Missing'")
+            && !stdout.contains("No matching symbol 'Camera::ToScreen'"),
+        "declared dependency export should resolve known members and reject missing ones; stdout={stdout:?}"
+    );
+}
+
+#[test]
 fn check_command_resolves_exports_via_plugin_files_search_path() {
     let base = TempDir::new("openplanet-lsp-plugin-search");
     fs::create_dir_all(base.join("deps/dep-plugin/src")).unwrap();
@@ -1031,7 +1202,7 @@ dependencies = ["DepPlugin"]
     .unwrap();
     fs::write(
         base.join("consumer/src/Main.as"),
-        "void Main() { DepPlugin::Hello(); }\n",
+        "void Main() { DepPlugin::Hello(); DepPlugin::Missing(); }\n",
     )
     .unwrap();
 
@@ -1047,13 +1218,14 @@ dependencies = ["DepPlugin"]
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert!(
-        output.status.success(),
-        "expected src/ export fallback to resolve dependency exports; stdout={stdout:?} stderr={stderr:?}"
-    );
-    assert!(
-        stdout.contains("0 diagnostics"),
-        "expected no diagnostics, got stdout={stdout:?}"
+    let missing: Vec<_> = stdout
+        .lines()
+        .filter(|line| line.contains("No matching symbol 'DepPlugin::Missing'"))
+        .collect();
+    assert_eq!(
+        missing.len(),
+        1,
+        "the declared export should resolve Hello while the absent member is diagnosed once; stdout={stdout:?} stderr={stderr:?}"
     );
 }
 
@@ -2338,7 +2510,8 @@ fn check_command_warnings_as_errors_config_precedence() {
 // diagnostics exist at the flagged constructs and that legal counterparts
 // stay silent.
 
-/// #37a: `i < u` → WARN Signed/Unsigned mismatch.
+/// #37a: mixed signed/unsigned relational and equality comparisons warn;
+/// literals, same-signedness comparisons, and explicit conversions stay silent.
 #[test]
 fn check_command_issue_repro_37a_signed_unsigned_warns() {
     let (ok, stdout, _) = run_issue_repro("37a-signed-unsigned-mismatch");
@@ -2354,8 +2527,16 @@ fn check_command_issue_repro_37a_signed_unsigned_warns() {
         .collect();
     assert_eq!(
         warned_lines.len(),
-        1,
-        "exactly one signed/unsigned warning (both-signed and both-unsigned stay silent); stdout={stdout:?}"
+        3,
+        "relational and both equality operators must warn exactly once; stdout={stdout:?}"
+    );
+    assert!(
+        warned_lines.iter().all(|line| {
+            line.contains("Main.as:7:")
+                || line.contains("Main.as:8:")
+                || line.contains("Main.as:9:")
+        }),
+        "only the three mixed variable comparisons should warn; stdout={stdout:?}"
     );
 }
 

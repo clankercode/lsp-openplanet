@@ -712,3 +712,15 @@ Workaround / fix:
 `openplanet-lsp check` reported "0 errors/warnings" for the same bytes the game
 then refused to compile, for both the TURBO and MP4 targets. A missing return
 value is a plain type-check that the LSP should be able to catch.
+
+## 2026-09-13, tm-mcp-pack-epp
+
+### Bare C++ rethrow accepted by LSP, rejected by AngelScript [FIXED: `BareThrow` diagnostic for bare `throw;`]
+Plugin source:
+    try { Dev::SetOffset(nod, 0, replacement); } catch { throw; }
+Compiler reports (game-side):
+    ItemModelInspect.as (629, 13) : ERR : Invalid expression: ambiguous name
+Workaround / fix:
+    Capture getExceptionInfo(), clean up ownership, then throw(error).
+LSP DEV check returned RC0 and did not flag the bare throw.
+Evidence: openplanet/research/tm2020/turbo-port/evidence/inspector-review-fix-game.log
