@@ -5,7 +5,7 @@
 ![openplanet-lsp watch TUI — relaxed density on showcase-diags](docs/images/watch-demo.png)
 
 Language Server Protocol implementation for **Openplanet AngelScript**
-(Trackmania / Openplanet plugins).
+(Trackmania / Openplanet plugins) by [XertroV](https://openplanet.dev/u/XertroV) + AI.
 
 ## Install
 
