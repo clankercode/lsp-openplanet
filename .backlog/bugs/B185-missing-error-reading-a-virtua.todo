@@ -1,0 +1,27 @@
+---
+complexity: medium
+created_at: "2026-10-18T18:40:43Z"
+depends_on: []
+estimate_hours: 1
+id: B185
+priority: high
+status: pending
+tags:
+    - diagnostics
+    - properties
+title: 'Missing error: reading a virtual property inside its own accessor'
+updated_at: "2026-10-18T18:40:43Z"
+---
+Openplanet (TM2020 in-game compile) rejects reading a virtual property inside its own accessor with "No matching symbol", but openplanet-lsp reports no error.
+
+Repro (Dips++ Editor, branch fix/honest-dirty-tracking @96386fb, Floors.as:140, 2026-10-19):
+```
+float get_px_lastFloorEnd() { return _px_lastFloorEnd; }
+void set_px_lastFloorEnd(float v) {
+    if (px_lastFloorEnd != v) MarkDirty();   // Openplanet: No matching symbol `px_lastFloorEnd`
+    _px_lastFloorEnd = v;
+}
+```
+Expected: LSP emits an error like the game compiler (or at least a warning) when the property name is used inside its own get_/set_ accessor. Workaround: call get_px_lastFloorEnd() explicitly.
+
+Related: #73 (LSP misses ++/--/+= on properties). Both are property-accessor semantics the LSP does not model; worth fixing together.
