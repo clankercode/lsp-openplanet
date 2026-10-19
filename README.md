@@ -26,6 +26,28 @@ openplanet-lsp --version
 openplanet-lsp --help
 ```
 
+## Editor support
+
+| Editor | Integration |
+|--------|-------------|
+| VS Code, VSCodium, Cursor | [VS Code extension](https://github.com/clankercode/lsp-openplanet-ext) |
+| Sublime Text | [LSP package client](https://github.com/clankercode/lsp-openplanet-sublime) |
+| Neovim | [Lua plugin and filetype detection](https://github.com/clankercode/lsp-openplanet-neovim) |
+| Zed | [Native extension](https://github.com/clankercode/lsp-openplanet-zed) |
+| JetBrains IDEs | [LSP4IJ integration](https://github.com/clankercode/lsp-openplanet-jetbrains) |
+| Helix | [Language configuration](https://github.com/clankercode/lsp-openplanet-helix) |
+| Emacs | [Eglot and lsp-mode integration](https://github.com/clankercode/lsp-openplanet-emacs) |
+
+Each integration documents installation, server discovery, configuration, and its
+tested editor versions. Start with the server installation above unless the
+integration offers an automatic release download. Open your plugin folder
+containing `info.toml`; `.as` files use AngelScript syntax, while `info.toml`
+remains TOML. An installed Openplanet type database enables game API completions
+and type-aware diagnostics; see [type-DB freshness](#typedb--type-db-freshness).
+
+Other LSP clients can run `openplanet-lsp --lsp` over stdio. Keep shared settings
+in `.openplanet-lsp.toml` so the same plugin configuration works across editors.
+
 ## Use as an LSP (editor)
 
 `openplanet-lsp` speaks **JSON-RPC over stdio**.
