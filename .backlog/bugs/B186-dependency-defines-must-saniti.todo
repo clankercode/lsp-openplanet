@@ -1,17 +1,18 @@
 ---
 claimed_at: "2026-11-05T09:32:17Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-11-05T09:37:22Z"
 complexity: medium
 created_at: "2026-11-05T08:09:00Z"
 depends_on: []
+duration_minutes: 5.09160893785
 estimate_hours: 1
 id: B186
 priority: high
 started_at: "2026-11-05T09:32:17Z"
-status: in_progress
+status: done
 tags: []
 title: 'Dependency defines must sanitize plus signs: game defines DEPENDENCY_DIPS___DEV'
-updated_at: "2026-11-05T09:32:17Z"
+updated_at: "2026-11-05T09:37:22Z"
 ---
 Live Openplanet 1.29.14 / TMNEXT probe on 2026-11-05: editor optional_dependencies=["dips++-dev"] with loaded dips++-dev. #if DEPENDENCY_DIPS___DEV logs defined; #if DEPENDENCY_DIPS++_DEV logs absent. config.rs dependency_define_suffix currently preserves + and explicitly assumes the underscore form never exists. This masks real dependency code and prevents parity. Repro evidence /mnt/build-cache/bug-sprint-1105/1-macro-probe.log and Openplanet.log [dependency-probe] at 19:07:39.055. Sanitize non-identifier + to _, verify other special characters against runtime. Plugin-side workaround: define_matrix explicitly exercises actual DEPENDENCY_DIPS___DEV plus absent branch. No LSP code edits in this sprint.
