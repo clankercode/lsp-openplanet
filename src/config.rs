@@ -2291,27 +2291,30 @@ pub(crate) fn dependency_define_name(dep: &str) -> Option<String> {
 /// `tm-control-mcp` → `DEPENDENCY_TM_CONTROL_MCP`, `ghosts-pp` →
 /// `DEPENDENCY_GHOSTS_PP`, `ManiaExchange` → `DEPENDENCY_MANIAEXCHANGE`.
 ///
-/// INFERENCE — three points the docs imply but do not state, and which no
-/// real dependency id exercises, so they are unverified against the game:
-///  1. Characters OUTSIDE {space, `-`, `.`} pass through untouched. We do NOT
-///     sanitise them. Mapping `Dips++` to `DIPS__` would be worse than
-///     leaving `DIPS++`: the game's name is inert (no `#if` can reference it,
-///     the lexer ends the identifier at `+`) whereas `DEPENDENCY_DIPS__` is a
-///     well-formed identifier the game never defines — B019's own failure
-///     mode, a define we have and the game lacks, making dead code live.
-///  2. Replacement is one underscore PER character: `a--b` → `A__B`, never a
-///     collapsed `A_B`.
-///  3. Uppercasing is ASCII-only, so `café` → `CAFé` (a byte-wise C-locale
+/// LIVE GAME (B186, OP 1.29.14 / TMNEXT, 2026-11-05): `+` is also replaced
+/// by `_`. With `optional_dependencies = ["dips++-dev"]` and that plugin
+/// loaded, `#if DEPENDENCY_DIPS___DEV` is defined and `#if DEPENDENCY_DIPS++_DEV`
+/// is absent — the lexer ends an identifier at `+`, so the game itself must
+/// emit the underscored form. Leaving `+` untouched was the B019 failure mode
+/// in reverse: a define the game HAS and we lack, masking real dependency
+/// code. Characters other than {space, `-`, `.`, `+`} are still unverified
+/// against the runtime and pass through.
+///
+/// Also measured / inferred:
+///  1. Replacement is one underscore PER character: `a--b` → `A__B`, never a
+///     collapsed `A_B` (and `dips++-dev` → `DIPS___DEV`, three underscores).
+///  2. Uppercasing is ASCII-only, so `café` → `CAFé` (a byte-wise C-locale
 ///     `toupper` behaves this way).
 ///
 /// The mapping COLLIDES by design — `my_plugin`, `my-plugin` and `my.plugin`
-/// all yield `MY_PLUGIN`. That is Openplanet's collision, not ours, so it is
-/// reproduced rather than diverged from; [`LspConfig::apply_manifest`] warns
-/// when one manifest declares two ids that collapse together.
+/// all yield `MY_PLUGIN`, and `dips++` collides with `dips__`. That is
+/// Openplanet's collision, not ours, so it is reproduced rather than diverged
+/// from; [`LspConfig::apply_manifest`] warns when one manifest declares two
+/// ids that collapse together.
 fn dependency_define_suffix(dep: &str) -> String {
     dep.chars()
         .map(|c| match c {
-            ' ' | '-' | '.' => '_',
+            ' ' | '-' | '.' | '+' => '_',
             other => other.to_ascii_uppercase(),
         })
         .collect()
@@ -5531,13 +5534,15 @@ shortcut_match_enums = true
             ("plugin-", "PLUGIN_", "trailing dash"),
             ("_plugin", "_PLUGIN", "leading underscore, untouched"),
             ("x", "X", "single character"),
-            // Characters OUTSIDE {space, '-', '.'} are left alone. The docs
-            // specify this; it is unverified against the running game, and no
-            // dependency ID in the real corpus exercises it.
-            ("Dips++", "DIPS++", "'+' is NOT in the replaced set"),
-            ("a+b", "A+B", "'+' untouched"),
-            ("a/b", "A/B", "'/' untouched"),
-            ("a@b", "A@B", "'@' untouched"),
+            // B186: `+` is replaced, live-probed OP 1.29.14 (`dips++-dev` →
+            // `DEPENDENCY_DIPS___DEV`). One underscore PER `+`, same as dash.
+            ("Dips++", "DIPS__", "'+' -> underscore (B186 game probe)"),
+            ("dips++-dev", "DIPS___DEV", "dips++-dev live probe spelling"),
+            ("a+b", "A_B", "'+' -> underscore"),
+            // Characters outside {space, '-', '.', '+'} still pass through —
+            // unverified against the runtime; do not invent replacements.
+            ("a/b", "A/B", "'/' untouched (no runtime probe)"),
+            ("a@b", "A@B", "'@' untouched (no runtime probe)"),
             // to_ascii_uppercase leaves non-ASCII alone. Also inference.
             ("café", "CAFé", "non-ASCII is not uppercased"),
             ("日本語", "日本語", "non-ASCII untouched"),
@@ -5551,22 +5556,30 @@ shortcut_match_enums = true
         }
     }
 
-    /// The rejected "safe superset". Mapping every non-alphanumeric to `_`
-    /// agrees with the docs on space/dash/period, but for anything else it
-    /// turns a name the game defines but no `#if` can reference (the lexer
-    /// ends the identifier at `+`) into a WELL-FORMED identifier the game
-    /// never defines. That is B019's own failure mode — a define we have and
-    /// the game does not, making dead code live — inside the function B019
-    /// exists to fix. Negative assertion, so nobody re-introduces it.
+    /// B186: the game defines `DEPENDENCY_DIPS___DEV` for `dips++-dev`. The
+    /// previous "do not sanitise `+`" guard was falsified by that probe —
+    /// keeping `DIPS++` left the LSP without the define the game has.
     #[test]
-    fn dependency_define_suffix_does_not_sanitise_beyond_the_documented_set() {
-        assert_ne!(
-            dependency_define_suffix("Dips++"),
-            "DIPS__",
-            "`+` must NOT become `_`: `DEPENDENCY_DIPS__` is a usable identifier \
-             the game never defines, while `DEPENDENCY_DIPS++` is inert"
+    fn dependency_define_suffix_sanitises_plus_to_match_the_game() {
+        assert_eq!(
+            dependency_define_name("dips++-dev").as_deref(),
+            Some("DEPENDENCY_DIPS___DEV")
         );
-        for (id, forbidden) in [("a+b", "A_B"), ("a/b", "A_B"), ("a@b", "A_B")] {
+        assert_eq!(
+            dependency_define_name("dips++").as_deref(),
+            Some("DEPENDENCY_DIPS__")
+        );
+        assert_eq!(
+            dependency_define_name("Dips++").as_deref(),
+            Some("DEPENDENCY_DIPS__")
+        );
+    }
+
+    /// Characters with no runtime probe must not be invented into `_` — that
+    /// would be B019's failure mode for ids the game does not rewrite.
+    #[test]
+    fn dependency_define_suffix_does_not_invent_replacements_for_unprobed_chars() {
+        for (id, forbidden) in [("a/b", "A_B"), ("a@b", "A_B")] {
             assert_ne!(dependency_define_suffix(id), forbidden, "`{id}`");
         }
     }
