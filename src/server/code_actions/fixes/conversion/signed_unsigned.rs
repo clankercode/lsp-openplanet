@@ -308,15 +308,19 @@ mod tests {
     // ── Current-behaviour guards ──────────────────────────────────────────
 
     #[test]
-    fn equality_operators_are_not_diagnosed_so_no_action_is_offered() {
-        // Confirmed against the checker: only `<`, `<=`, `>`, `>=` (and a
-        // top-level `+`) warn. `==` / `!=` stay silent, so must we.
+    fn equality_operators_are_fixable_like_other_relational_ops() {
+        // Game parity (CHANGELOG 0.8.0): mixed `==` / `!=` warn the same way
+        // as `<`/`<=`/`>`/`>=`, so the cast-each-side quick fixes apply too.
         for op in ["==", "!="] {
             let source = format!("void f(int i, uint n) {{ if (i {op} n) {{}} }}");
+            assert_eq!(count(&source, FAMILY_NAME), 2, "for `{op}`");
             assert_eq!(
-                count(&source, FAMILY_NAME),
-                0,
-                "expected silence for `{op}`"
+                apply(&source, FAMILY_NAME, "left"),
+                format!("void f(int i, uint n) {{ if (uint(i) {op} n) {{}} }}")
+            );
+            assert_eq!(
+                apply(&source, FAMILY_NAME, "right"),
+                format!("void f(int i, uint n) {{ if (i {op} int(n)) {{}} }}")
             );
         }
     }

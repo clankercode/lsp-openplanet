@@ -206,6 +206,14 @@ b165_primitive_funcdef_exactness::changing_a_question_expectation_cannot_hide_it
 b165_primitive_funcdef_exactness::the_checker_matches_the_measured_primitive_matrix
 b165_primitive_funcdef_exactness::the_engine_rejects_every_primitive_mismatch_including_real_startnew
 b165_primitive_funcdef_exactness::the_live_oracle_covers_every_requested_direction_and_both_controls
+b172_b177_typecheck::b172_rejects_values_returned_from_void_functions_but_not_bare_return
+b172_b177_typecheck::b173_only_dictionary_value_conversions_supported_by_the_typedb_are_accepted
+b172_b177_typecheck::b174_rejects_void_calls_only_when_a_value_is_required
+b172_b177_typecheck::b175_flags_the_second_duplicate_global_function_across_files
+b172_b177_typecheck::b176_rejects_non_convertible_handles_but_accepts_upcasts_and_explicit_casts
+b172_b177_typecheck::b177_rejects_primitive_inout_parameters_but_accepts_object_inout
+b172_b177_typecheck::b182_rejects_bare_throw_but_accepts_throwing_a_value
+b172_b177_typecheck::b183_rejects_unregistered_unary_negation_but_keeps_numeric_negation_legal
 cli_check_tests::b044_probe_fixture_matches_the_shipped_type_db
 cli_check_tests::b091_a_delegate_of_the_wrong_family_was_already_reported
 cli_check_tests::b091_bare_method_references_at_funcdef_slots_are_reported
@@ -224,6 +232,7 @@ cli_check_tests::check_command_arch_flag_selects_arch_defines
 cli_check_tests::check_command_const_handle_declaration_is_anchored_at_the_const_keyword
 cli_check_tests::check_command_define_flag_beats_a_config_removal
 cli_check_tests::check_command_defines_re_enable_server_under_narrowed_profile
+cli_check_tests::check_command_does_not_resolve_exports_from_an_undeclared_dependency
 cli_check_tests::check_command_errors_config_and_flag_precedence
 cli_check_tests::check_command_exit_codes_and_warnings_as_errors
 cli_check_tests::check_command_exits_zero_when_clean
@@ -304,8 +313,10 @@ cli_check_tests::check_command_plugins_dir_flag_is_visible_to_the_dependency_def
 cli_check_tests::check_command_rejects_unknown_selector_values
 cli_check_tests::check_command_reports_each_config_problem_once
 cli_check_tests::check_command_reports_missing_required_dependency
+cli_check_tests::check_command_reports_missing_symbols_in_newly_created_sources
 cli_check_tests::check_command_reports_no_diagnostics_inside_an_omitted_file
 cli_check_tests::check_command_reports_workspace_diagnostics
+cli_check_tests::check_command_resolves_declared_export_and_rejects_missing_export_member
 cli_check_tests::check_command_resolves_exports_via_plugin_files_search_path
 cli_check_tests::check_command_showcase_diags_fixture_has_many_diagnostics
 cli_check_tests::check_command_signature_flag_beats_config_signature_mode
@@ -327,6 +338,7 @@ cli_check_tests::check_command_unused_silent_when_the_only_caller_is_gitignored
 cli_check_tests::check_command_unused_silent_when_the_only_caller_is_in_ignore_paths
 cli_check_tests::check_command_unused_silent_when_the_only_caller_is_outside_source_paths
 cli_check_tests::check_command_unused_still_warns_when_omitted_files_do_not_use_it
+cli_check_tests::check_command_validates_current_engine_overload_regressions
 cli_check_tests::check_command_warnings_as_errors_config_precedence
 cli_check_tests::check_command_without_a_header_still_loads_the_type_db
 cli_check_tests::check_does_not_report_exports_that_resolve_under_src
@@ -1123,7 +1135,7 @@ openplanet_lsp::server::code_actions::fixes::conversion::signed_unsigned::tests:
 openplanet_lsp::server::code_actions::fixes::conversion::signed_unsigned::tests::cast_target_follows_the_other_operand_width
 openplanet_lsp::server::code_actions::fixes::conversion::signed_unsigned::tests::compound_operands_are_wrapped_whole_and_still_parse
 openplanet_lsp::server::code_actions::fixes::conversion::signed_unsigned::tests::each_side_casts_only_itself
-openplanet_lsp::server::code_actions::fixes::conversion::signed_unsigned::tests::equality_operators_are_not_diagnosed_so_no_action_is_offered
+openplanet_lsp::server::code_actions::fixes::conversion::signed_unsigned::tests::equality_operators_are_fixable_like_other_relational_ops
 openplanet_lsp::server::code_actions::fixes::conversion::signed_unsigned::tests::every_relational_operator_is_fixable
 openplanet_lsp::server::code_actions::fixes::conversion::signed_unsigned::tests::explicit_conversions_and_literals_stay_silent
 openplanet_lsp::server::code_actions::fixes::conversion::signed_unsigned::tests::neither_side_is_preferred_or_auto_applicable
@@ -2265,6 +2277,7 @@ openplanet_lsp::typecheck::checker::tests::array_index_returns_element_type
 openplanet_lsp::typecheck::checker::tests::array_insert_last_concrete_element_is_silent
 openplanet_lsp::typecheck::checker::tests::array_length_is_numeric
 openplanet_lsp::typecheck::checker::tests::array_shorthand_syntax
+openplanet_lsp::typecheck::checker::tests::arrays_support_inout_but_value_primitives_do_not
 openplanet_lsp::typecheck::checker::tests::assign_to_binary_fires
 openplanet_lsp::typecheck::checker::tests::assign_to_call_fires
 openplanet_lsp::typecheck::checker::tests::assign_to_ident_ok
@@ -2278,8 +2291,20 @@ openplanet_lsp::typecheck::checker::tests::b081_a_workspace_class_shadowing_an_e
 openplanet_lsp::typecheck::checker::tests::b110_array_sort_comparator_element_type_is_exact
 openplanet_lsp::typecheck::checker::tests::b110_startnew_userdata_handlers_still_bind_their_exact_slot
 openplanet_lsp::typecheck::checker::tests::b165_a_bare_int_handler_does_not_bind_the_int64_userdata_slot
+openplanet_lsp::typecheck::checker::tests::b185_const_getter_cannot_read_its_own_virtual_property
+openplanet_lsp::typecheck::checker::tests::b185_explicit_accessor_call_inside_setter_is_allowed
+openplanet_lsp::typecheck::checker::tests::b185_getter_cannot_read_its_own_virtual_property
+openplanet_lsp::typecheck::checker::tests::b185_local_shadowing_the_property_name_is_allowed
+openplanet_lsp::typecheck::checker::tests::b185_namespace_virtual_property_self_read_is_rejected
+openplanet_lsp::typecheck::checker::tests::b185_other_virtual_property_inside_accessor_is_allowed
+openplanet_lsp::typecheck::checker::tests::b185_property_syntax_accessor_cannot_read_itself
+openplanet_lsp::typecheck::checker::tests::b185_property_syntax_setter_cannot_write_itself
+openplanet_lsp::typecheck::checker::tests::b185_setter_cannot_read_its_own_virtual_property
+openplanet_lsp::typecheck::checker::tests::b185_setter_cannot_write_its_own_virtual_property
+openplanet_lsp::typecheck::checker::tests::b185_this_qualified_self_property_is_also_rejected
 openplanet_lsp::typecheck::checker::tests::bare_string_method_param_warns
 openplanet_lsp::typecheck::checker::tests::bare_string_param_warns
+openplanet_lsp::typecheck::checker::tests::builtin_overload_scoring_accepts_enum_to_int_and_wstring_to_string
 openplanet_lsp::typecheck::checker::tests::child_inherits_parent_field_cross_file
 openplanet_lsp::typecheck::checker::tests::child_inherits_parent_method_cross_file
 openplanet_lsp::typecheck::checker::tests::class_member_unknown_type
@@ -2341,6 +2366,7 @@ openplanet_lsp::typecheck::checker::tests::external_ui_selectable_four_arg_fires
 openplanet_lsp::typecheck::checker::tests::external_ui_selectable_valid_arity_ok
 openplanet_lsp::typecheck::checker::tests::external_unique_overload_rejects_wrong_signature_nodtree_callback
 openplanet_lsp::typecheck::checker::tests::external_unique_overload_rejects_wrong_signature_startnew
+openplanet_lsp::typecheck::checker::tests::external_value_ctor_without_registered_conversion_fires
 openplanet_lsp::typecheck::checker::tests::float_truncation_exact_int_init_stays_silent
 openplanet_lsp::typecheck::checker::tests::float_truncation_float_init_stays_silent
 openplanet_lsp::typecheck::checker::tests::float_truncation_float_var_to_int_warns_truncated
@@ -2461,7 +2487,10 @@ openplanet_lsp::typecheck::checker::tests::sum_add_mix_vs_uint_var_warns
 openplanet_lsp::typecheck::checker::tests::sum_array_length_vs_literal_silent
 openplanet_lsp::typecheck::checker::tests::sum_direct_relational_each_op_warns
 openplanet_lsp::typecheck::checker::tests::sum_direct_relational_var_vs_var_warns
+openplanet_lsp::typecheck::checker::tests::sum_equality_mixed_engine_property_warns
+openplanet_lsp::typecheck::checker::tests::sum_equality_mixed_literal_stays_silent
 openplanet_lsp::typecheck::checker::tests::sum_equality_mixed_silent
+openplanet_lsp::typecheck::checker::tests::sum_equality_mixed_warns
 openplanet_lsp::typecheck::checker::tests::sum_literal_left_of_uint_silent
 openplanet_lsp::typecheck::checker::tests::sum_mul_and_bitand_mix_silent
 openplanet_lsp::typecheck::checker::tests::sum_same_signedness_relational_silent
@@ -2503,6 +2532,7 @@ openplanet_lsp::typecheck::checker::tests::typedb_funcdef_ctor_unnamespaced_coro
 openplanet_lsp::typecheck::checker::tests::typedb_funcdef_ctor_userdata_accepts_ref_method_reference
 openplanet_lsp::typecheck::checker::tests::typedb_funcdef_ctor_wrong_signature_and_arity_error
 openplanet_lsp::typecheck::checker::tests::typedb_namespace_member_miss_fires_once
+openplanet_lsp::typecheck::checker::tests::unary_neg_on_engine_value_requires_operator
 openplanet_lsp::typecheck::checker::tests::unary_not_on_bool_stays_silent
 openplanet_lsp::typecheck::checker::tests::unary_not_on_const_bool_stays_silent
 openplanet_lsp::typecheck::checker::tests::unary_not_on_handle_is_diagnosed
@@ -3040,6 +3070,8 @@ openplanet_lsp::workspace::load::tests::opening_an_omitted_file_keeps_it_usage_o
 openplanet_lsp::workspace::load::tests::optional_dependency_missing_is_not_an_error
 openplanet_lsp::workspace::load::tests::own_export_paths_resolve_across_a_configured_search_root
 openplanet_lsp::workspace::load::tests::own_manifest_exports_collected_as_export_paths
+openplanet_lsp::workspace::load::tests::plugin_identity_falls_back_to_module_then_name
+openplanet_lsp::workspace::load::tests::plugin_identity_prefers_siteid_and_keeps_distinct_plugins
 openplanet_lsp::workspace::load::tests::required_dependency_missing_is_reported
 openplanet_lsp::workspace::load::tests::required_dependency_missing_without_plugin_dirs_is_reported
 openplanet_lsp::workspace::load::tests::shared_exports_also_collected

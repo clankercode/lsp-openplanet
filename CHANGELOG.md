@@ -13,6 +13,12 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+### Fixed
+- **Virtual property self-access inside accessors** (B185) — reading or
+  writing `P` (or `this.P`) inside `get_P` / `set_P` (or property-syntax
+  accessors) now reports `No matching symbol 'P'`, matching Openplanet.
+  Explicit `get_P()` / `set_P()` calls remain legal.
+
 ## [0.8.0] - 2026-10-15
 
 ### Added

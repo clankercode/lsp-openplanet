@@ -787,6 +787,11 @@ pub struct Checker<'a> {
     /// Only maintained while recording, and only for declarations that
     /// have a body (a bodyless declaration binds nothing).
     local_decl_fn_stack: Vec<LocalDeclFnCtx>,
+    /// B185: while checking `get_P` / `set_P` (or property-syntax
+    /// accessors for `P`), the bare property name `P` is not a symbol —
+    /// Openplanet answers `No matching symbol 'P'`. Explicit `get_P()` /
+    /// `set_P()` calls stay legal. `None` outside those bodies.
+    virtual_property_under_check: Option<String>,
 }
 
 impl<'a> Checker<'a> {
@@ -810,6 +815,7 @@ impl<'a> Checker<'a> {
             used_names: None,
             local_decls: None,
             local_decl_fn_stack: Vec::new(),
+            virtual_property_under_check: None,
         }
     }
 
@@ -1769,6 +1775,9 @@ impl<'a> Checker<'a> {
         body: &FunctionBody,
         setter_value: Option<(TypeRepr, Span)>,
     ) {
+        let prev = self
+            .virtual_property_under_check
+            .replace(property_name.to_string());
         self.push_frame();
         if let Some((ty, span)) = setter_value {
             self.define_local("value".to_string(), ty, span);
@@ -1789,6 +1798,33 @@ impl<'a> Checker<'a> {
             self.local_decl_fn_stack.pop();
         }
         self.pop_frame();
+        self.virtual_property_under_check = prev;
+    }
+
+    /// AngelScript / Openplanet virtual-property name encoded by a
+    /// `get_P` / `set_P` method spelling, if any.
+    fn virtual_property_name_from_accessor(method_name: &str) -> Option<&str> {
+        method_name
+            .strip_prefix("get_")
+            .or_else(|| method_name.strip_prefix("set_"))
+            .filter(|prop| !prop.is_empty())
+    }
+
+    /// B185: emit `No matching symbol 'P'` when `P` is read/written inside
+    /// its own `get_P` / `set_P` (or property-syntax) accessor. Returns
+    /// `true` when the access was rejected.
+    fn reject_virtual_property_self_access(&mut self, name: &str, span: Span) -> bool {
+        if self.virtual_property_under_check.as_deref() != Some(name) {
+            return false;
+        }
+        self.diagnostics.push(TypeDiagnostic {
+            span,
+            kind: TypeDiagnosticKind::NoMatchingSymbol {
+                qualified: name.to_string(),
+                hint: None,
+            },
+        });
+        true
     }
 
     /// GH #37 slice 3: flag the second (and later) top-level free function
@@ -1858,6 +1894,13 @@ impl<'a> Checker<'a> {
             };
             self.local_decl_fn_stack.push(ctx);
         }
+        // B185: `get_P` / `set_P` bodies must not resolve bare `P` as the
+        // virtual property they implement (game: `No matching symbol 'P'`).
+        let prev_virtual =
+            match Self::virtual_property_name_from_accessor(func.name.text(self.source)) {
+                Some(prop) => self.virtual_property_under_check.replace(prop.to_string()),
+                None => self.virtual_property_under_check.clone(),
+            };
         for p in &func.params {
             self.warn_string_by_value_param(p);
             if p.modifier == ParamModifier::Inout && !type_supports_handles(&p.type_expr) {
@@ -1890,6 +1933,7 @@ impl<'a> Checker<'a> {
                 });
             }
         }
+        self.virtual_property_under_check = prev_virtual;
         self.pop_frame();
         self.function_frame_starts.pop();
         self.return_type_stack.pop();
@@ -2627,6 +2671,21 @@ impl<'a> Checker<'a> {
             return TypeRepr::Error(String::new());
         }
         let member_name = member.text(self.source).to_string();
+        // B185: member access of `P` on a receiver typed as the class
+        // currently under check, inside `get_P` / `set_P`, is the same
+        // forbidden self-property access as bare `P` (`this.P`, and also
+        // `other.P` when `other` shares that class type — AngelScript
+        // suppresses the property sugar for the name while the accessor
+        // body runs). A receiver of a different type is unaffected.
+        if self.virtual_property_under_check.as_deref() == Some(member_name.as_str()) {
+            if let Some(cls) = self.current_class() {
+                if Self::base_type_name(obj_ty).as_deref() == Some(cls.name.as_str())
+                    && self.reject_virtual_property_self_access(&member_name, span)
+                {
+                    return TypeRepr::Error(String::new());
+                }
+            }
+        }
         // A const receiver propagates `Const` into field access results
         // (iter 32). Method access is routed through `call_type::Member`
         // so this only affects field reads. We do NOT wrap the array /
@@ -5863,6 +5922,12 @@ impl<'a> Checker<'a> {
                 if let Some(local) = self.lookup_local(&name) {
                     return local.ty.clone();
                 }
+                // B185: before virtual-property widening, reject bare `P`
+                // inside `get_P` / `set_P` (game: `No matching symbol 'P'`).
+                // Locals named `P` already returned above.
+                if self.reject_virtual_property_self_access(&name, expr.span) {
+                    return TypeRepr::Error(String::new());
+                }
                 // 2. Class member (implicit `this.`).
                 if let Some(ty) = self.lookup_class_member(&name) {
                     // Resolved to a member of this class (or an ancestor):
@@ -7362,6 +7427,217 @@ void Main() {
             undef.is_empty(),
             "expected no undefined-ident for windowOpen, got {:?}",
             diags
+        );
+    }
+
+    /// B185: Openplanet rejects reading a virtual property inside its own
+    /// accessor with `No matching symbol 'P'`. The Dips++ Editor repro was
+    /// `set_px_lastFloorEnd` comparing against bare `px_lastFloorEnd`.
+    #[test]
+    fn b185_setter_cannot_read_its_own_virtual_property() {
+        let source = r#"
+            class Floors {
+                float _px_lastFloorEnd;
+                float get_px_lastFloorEnd() { return _px_lastFloorEnd; }
+                void set_px_lastFloorEnd(float v) {
+                    if (px_lastFloorEnd != v) { }
+                    _px_lastFloorEnd = v;
+                }
+            }
+        "#;
+        let diags = check(source);
+        let hits = no_matching_symbols(&diags);
+        assert!(
+            hits.iter().any(|(q, _)| q == "px_lastFloorEnd"),
+            "expected No matching symbol 'px_lastFloorEnd' inside its setter, got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn b185_getter_cannot_read_its_own_virtual_property() {
+        let source = r#"
+            class C {
+                float _v;
+                float get_V() { return V; }
+                void set_V(float v) { _v = v; }
+            }
+        "#;
+        let diags = check(source);
+        let hits = no_matching_symbols(&diags);
+        assert!(
+            hits.iter().any(|(q, _)| q == "V"),
+            "expected No matching symbol 'V' inside its getter, got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn b185_setter_cannot_write_its_own_virtual_property() {
+        let source = r#"
+            class C {
+                float _v;
+                float get_V() { return _v; }
+                void set_V(float v) { V = v; }
+            }
+        "#;
+        let diags = check(source);
+        let hits = no_matching_symbols(&diags);
+        assert!(
+            hits.iter().any(|(q, _)| q == "V"),
+            "expected No matching symbol 'V' on write inside its setter, got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn b185_this_qualified_self_property_is_also_rejected() {
+        let source = r#"
+            class C {
+                float _v;
+                float get_V() { return _v; }
+                void set_V(float v) {
+                    if (this.V != v) { }
+                    _v = v;
+                }
+            }
+        "#;
+        let diags = check(source);
+        let hits = no_matching_symbols(&diags);
+        assert!(
+            hits.iter().any(|(q, _)| q == "V"),
+            "expected No matching symbol 'V' for this.V inside its setter, got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn b185_explicit_accessor_call_inside_setter_is_allowed() {
+        let source = r#"
+            class C {
+                float _v;
+                float get_V() { return _v; }
+                void set_V(float v) {
+                    if (get_V() != v) { }
+                    _v = v;
+                }
+            }
+        "#;
+        let diags = check(source);
+        let hits = no_matching_symbols(&diags);
+        assert!(
+            hits.iter().all(|(q, _)| q != "V" && q != "get_V"),
+            "explicit get_V() must stay legal inside set_V, got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn b185_other_virtual_property_inside_accessor_is_allowed() {
+        let source = r#"
+            class C {
+                float _a;
+                float _b;
+                float get_A() { return _a; }
+                void set_A(float v) { _a = v; }
+                float get_B() { return _b; }
+                void set_B(float v) {
+                    if (A != v) { }
+                    _b = v;
+                }
+            }
+        "#;
+        let diags = check(source);
+        let hits = no_matching_symbols(&diags);
+        assert!(
+            hits.iter().all(|(q, _)| q != "A"),
+            "reading a different virtual property inside set_B must stay legal, got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn b185_property_syntax_accessor_cannot_read_itself() {
+        let source = r#"
+            class C {
+                float _v;
+                float V {
+                    get { return V; }
+                    set { _v = value; }
+                }
+            }
+        "#;
+        let diags = check(source);
+        let hits = no_matching_symbols(&diags);
+        assert!(
+            hits.iter().any(|(q, _)| q == "V"),
+            "expected No matching symbol 'V' inside property-syntax getter, got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn b185_namespace_virtual_property_self_read_is_rejected() {
+        let source = r#"
+            namespace Ns {
+                float _v;
+                float get_V() { return V; }
+                void set_V(float v) { _v = v; }
+            }
+        "#;
+        let diags = check_closed_workspace(source);
+        let hits = no_matching_symbols(&diags);
+        assert!(
+            hits.iter().any(|(q, _)| q == "V" || q == "Ns::V"),
+            "expected No matching symbol for namespace virtual property self-read, got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn b185_const_getter_cannot_read_its_own_virtual_property() {
+        let source = r#"
+            class C {
+                float _v;
+                float get_V() const { return V; }
+            }
+        "#;
+        let diags = check(source);
+        let hits = no_matching_symbols(&diags);
+        assert!(
+            hits.iter().any(|(q, _)| q == "V"),
+            "expected No matching symbol 'V' inside const getter, got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn b185_local_shadowing_the_property_name_is_allowed() {
+        let source = r#"
+            class C {
+                float _v;
+                float get_V() { return _v; }
+                void set_V(float v) {
+                    float V = v;
+                    _v = V;
+                }
+            }
+        "#;
+        let diags = check(source);
+        let hits = no_matching_symbols(&diags);
+        assert!(
+            hits.iter().all(|(q, _)| q != "V"),
+            "a local named V must win over the forbidden self-property, got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn b185_property_syntax_setter_cannot_write_itself() {
+        let source = r#"
+            class C {
+                float _v;
+                float V {
+                    get { return _v; }
+                    set { V = value; }
+                }
+            }
+        "#;
+        let diags = check(source);
+        let hits = no_matching_symbols(&diags);
+        assert!(
+            hits.iter().any(|(q, _)| q == "V"),
+            "expected No matching symbol 'V' on write inside property-syntax setter, got {diags:?}"
         );
     }
 
