@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-11-05T08:41:42Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-11-05T09:32:09Z"
 complexity: medium
 created_at: "2026-10-18T18:40:43Z"
 depends_on: []
+duration_minutes: 50.4506732904
 estimate_hours: 1
 id: B185
 priority: high
 started_at: "2026-11-05T08:41:42Z"
-status: in_progress
+status: done
 tags: []
 title: 'Missing error: reading a virtual property inside its own accessor'
-updated_at: "2026-11-05T08:41:42Z"
+updated_at: "2026-11-05T09:32:09Z"
 ---
 Openplanet (TM2020 in-game compile) rejects reading a virtual property inside its own accessor with "No matching symbol", but openplanet-lsp reports no error.
 
