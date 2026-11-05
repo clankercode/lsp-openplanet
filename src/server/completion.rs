@@ -1789,9 +1789,13 @@ mod tests {
                 }
             }
         }
-        // Anti-vacuity: a run that offered nothing would satisfy this trivially.
+        // Anti-vacuity: a run that offered nothing would satisfy this
+        // trivially. The fixture dump currently yields ~28 `E*`-prefix
+        // shortcut labels across the namespaces below after B056/B069
+        // visibility narrowing; keep the floor well under that but above
+        // a handful so a silent producer still fails.
         assert!(
-            offered > 40,
+            offered > 20,
             "only {offered} shortcut labels offered; the law would be vacuous"
         );
         assert!(

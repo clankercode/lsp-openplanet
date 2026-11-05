@@ -446,6 +446,7 @@ fn test_lsp_diagnostics_cross_document_workspace() {
         &LspConfig::default(),
         None,
         &table,
+        None,
     );
     let offenders: Vec<&str> = diags
         .iter()
@@ -676,6 +677,7 @@ fn test_corpus_type_diagnostic_histogram() {
                 &cfg,
                 Some(&index),
                 &workspace,
+                None,
             );
             if diags.is_empty() {
                 continue;

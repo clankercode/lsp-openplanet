@@ -5794,13 +5794,14 @@ fn b091_bare_method_references_at_funcdef_slots_are_reported() {
     // rule fired somewhere it should not have. Without this the per-line loop
     // is satisfied by a rule that rejects everything.
     //
-    // 20, not 19: line 78 carries the pre-existing `@=` handle/value error
-    // alongside the new conversion error, and line 83 is the pre-existing
-    // wrong-wrapper row pinned by the test below. Master reports exactly those
-    // two lines and nothing else here — measured, 2 errors before, 20 after.
+    // 23: the 20 B091 bind-site rows, plus three B172 `Data type can't be
+    // 'void'` companions on lines 72/76/77 where a method reference decays to
+    // `void()` in a value position. Line 78 still carries the pre-existing
+    // `@=` handle/value error alongside the conversion error, and line 83 is
+    // the wrong-wrapper row pinned by the test below.
     assert_eq!(
         errors.len(),
-        20,
+        23,
         "unexpected extra diagnostics beyond the listed rows:\n{joined}"
     );
 }

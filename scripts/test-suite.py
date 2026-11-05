@@ -553,9 +553,17 @@ def reconcile(
     sections = split_sections(lines)
     problems: list[str] = []
 
+    def canon(path: str) -> str:
+        # Cargo's `Running (...path...)` line is absolute when the build-dir
+        # lives outside the cwd, and relative (`target/build/debug/deps/...`)
+        # when it does not. The JSON enumeration is always absolute. Compare
+        # resolved paths so a lane-local build-dir cannot make a complete
+        # green run look like every binary "never ran".
+        return str((REPO_ROOT / path).resolve()) if path else path
+
     started_without_summary = [s for s in sections if s.path and not s.summaries]
-    reported_paths = {s.path for s in sections if s.path and s.summaries}
-    missing = {p: n for p, n in expected.items() if p not in reported_paths}
+    reported_paths = {canon(s.path) for s in sections if s.path and s.summaries}
+    missing = {p: n for p, n in expected.items() if canon(p) not in reported_paths}
 
     passed = sum(int(m["passed"]) for s in sections for m in s.summaries)
     failed = sum(int(m["failed"]) for s in sections for m in s.summaries)
