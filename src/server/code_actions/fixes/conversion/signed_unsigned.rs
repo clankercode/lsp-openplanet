@@ -55,7 +55,7 @@ struct Operands<'a> {
 }
 
 fn operands<'a>(diag: &TypeDiagnostic, ctx: &'a FixContext<'a>) -> Option<Operands<'a>> {
-    let (lhs, rhs) = binary_by_span(&ctx.analysis.file, diag.span)?;
+    let (lhs, rhs) = binary_by_span(&ctx.analysis.file, ctx.analysis.masked_source(), diag.span)?;
     let (left_ty, right_ty) = operand_primitives(ctx, lhs.span, rhs.span)?;
     // Belt and braces: the checker only emits this on a signed/unsigned
     // mix, but a fix that named the wrong cast target would compile and

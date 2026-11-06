@@ -6204,7 +6204,10 @@ impl<'a> Checker<'a> {
                             let rs = signedness_of(self, rhs);
                             if let (Some(ls), Some(rs)) = (ls, rs) {
                                 if ls != rs {
-                                    emit_span = Some(expr.span);
+                                    emit_span = Some(
+                                        comparison_operator_span(self.source, expr)
+                                            .unwrap_or(expr.span),
+                                    );
                                 }
                             }
                         }
@@ -6634,6 +6637,31 @@ fn removed_api_hint(qual: &str) -> Option<&'static str> {
         "string::Repeat" => Some("Text::Repeat"),
         _ => None,
     }
+}
+
+/// Locate a comparison's operator in the operand gap. Lexing the gap skips
+/// comments and prevents an operator-like string in trivia from becoming the
+/// diagnostic anchor. Shared with quick fixes so a token-sized diagnostic
+/// still selects exactly the binary expression whose operands need edits.
+pub(crate) fn comparison_operator_span(source: &str, expr: &Expr) -> Option<Span> {
+    let ExprKind::Binary { lhs, op, rhs } = &expr.kind else {
+        return None;
+    };
+    let expected = match op {
+        BinOp::Lt => TokenKind::Lt,
+        BinOp::LtEq => TokenKind::LtEq,
+        BinOp::Gt => TokenKind::Gt,
+        BinOp::GtEq => TokenKind::GtEq,
+        BinOp::Eq => TokenKind::EqEq,
+        BinOp::NotEq => TokenKind::BangEq,
+        _ => return None,
+    };
+    let start = lhs.span.end;
+    let gap = source.get(start as usize..rhs.span.start as usize)?;
+    let token = crate::lexer::tokenize_filtered(gap)
+        .into_iter()
+        .find(|token| token.kind == expected)?;
+    Some(Span::new(start + token.span.start, start + token.span.end))
 }
 
 /// Levenshtein distance capped at `max` — small helper for near-name

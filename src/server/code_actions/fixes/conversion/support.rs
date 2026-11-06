@@ -3,8 +3,8 @@
 //! All five B037 diagnostics are anchored on a span but carry no pointer
 //! back to the node the fix has to edit: `FloatTruncation` and `SignChange`
 //! sit on the *initializer* while the fix needs the *declared type*,
-//! `SignedUnsignedMismatch` sits on the whole comparison while the fix needs
-//! one operand, `UnreachableCode` sits on the first dead statement while the
+//! `SignedUnsignedMismatch` sits on the comparison operator (or an addition)
+//! while the fix needs one operand, `UnreachableCode` sits on the first dead statement while the
 //! fix needs the whole dead run, and `MissingReturn` sits on the function
 //! *name* while the fix needs the body's closing brace.
 //!
@@ -302,26 +302,39 @@ pub fn var_decl_by_init(
     find.found
 }
 
-/// The binary expression spanning exactly `span` — the anchor
-/// `SignedUnsignedMismatch` uses. Exact-span matching, not containment: the
-/// checker anchors that diagnostic on the whole comparison, and a fix that
-/// picked a different node would cast the wrong operand.
-pub fn binary_by_span(file: &SourceFile, span: Span) -> Option<(&Expr, &Expr)> {
-    struct Find<'a> {
+/// Find a binary expression by its exact diagnostic anchor: a whole
+/// expression for addition, or a comparison operator token. Containment
+/// would select the wrong binary expression in nested comparisons.
+pub fn binary_by_span<'a>(
+    file: &'a SourceFile,
+    source: &str,
+    span: Span,
+) -> Option<(&'a Expr, &'a Expr)> {
+    struct Find<'a, 's> {
+        source: &'s str,
         span: Span,
         found: Option<(&'a Expr, &'a Expr)>,
     }
-    impl<'a> AstVisit<'a> for Find<'a> {
+    impl<'a> AstVisit<'a> for Find<'a, '_> {
         fn expr(&mut self, expr: &'a Expr) {
-            if self.found.is_some() || expr.span != self.span {
+            if self.found.is_some() {
                 return;
             }
             if let ExprKind::Binary { lhs, rhs, .. } = &expr.kind {
-                self.found = Some((lhs, rhs));
+                if expr.span == self.span
+                    || crate::typecheck::checker::comparison_operator_span(self.source, expr)
+                        == Some(self.span)
+                {
+                    self.found = Some((lhs, rhs));
+                }
             }
         }
     }
-    let mut find = Find { span, found: None };
+    let mut find = Find {
+        source,
+        span,
+        found: None,
+    };
     walk_file(file, &mut find);
     find.found
 }
