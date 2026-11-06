@@ -258,7 +258,7 @@ pub enum TypeDiagnosticKind {
         name: String,
     },
     /// GH #73: script accessor values cannot supply the reference needed
-    /// by an increment/decrement or compound assignment.
+    /// by increment/decrement. Compound assignments compile in OP1.29.14.
     PropertyCombinedReadWrite,
     /// Game parity (GH #37): statement(s) after a terminating statement
     /// (return/break/continue, or an if-else where both branches terminate)
@@ -6423,9 +6423,6 @@ impl<'a> Checker<'a> {
                 // `loc.tx += …`): the game rejects with
                 // `The property has no set accessor`.
                 self.check_readonly_prop_assign(lhs, AccessPosition::of_assign_op(*op));
-                if !matches!(op, AssignOp::Assign) {
-                    self.check_combined_property_operation(lhs);
-                }
                 TypeRepr::Error(String::new())
             }
             ExprKind::HandleAssign { lhs, rhs } => {
