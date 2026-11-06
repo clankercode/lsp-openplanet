@@ -93,6 +93,7 @@
 use std::collections::{HashSet, VecDeque};
 
 use crate::symbols::scope::SymbolKind;
+use crate::typecheck::repr::PrimitiveType;
 use crate::typecheck::GlobalScope;
 
 /// One interface method a class fails to implement.
@@ -418,18 +419,43 @@ fn types_equal(a: &str, b: &str, scope: &GlobalScope) -> Option<bool> {
     }
 }
 
-/// Collapse a source type spelling to a comparable form: whitespace
-/// removed, so `const string &in` and `const string&in` are one thing.
+/// Collapse a source type spelling to a comparable form: remove whitespace
+/// and normalize primitive aliases (`int32`/`uint32` to `int`/`uint`).
+/// Preserve modifiers and normalize whole identifiers before removing their
+/// boundaries, including inside templates, so `const uint32 &in` matches
+/// `const uint&in` without changing names such as `uint32Box`.
 ///
 /// `pub(crate)` since B112, so the interface-stub quick fix compares with
 /// the SAME rule instead of its own inline copy. It had one, and matching a
 /// canonicalised pooled type against a raw display string only worked while
 /// the display string happened to be canonicalised too — see
 /// `render_signature`, which no longer is.
-/// Deliberately NOT a semantic normalisation — the semantic question is
-/// handed to [`type_is_comparable`], which refuses rather than guesses.
+/// Other semantic questions are handed to [`type_is_comparable`], which
+/// refuses rather than guesses.
 pub(crate) fn canonical_type(text: &str) -> String {
-    text.chars().filter(|c| !c.is_whitespace()).collect()
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.char_indices().peekable();
+    while let Some((start, c)) = chars.next() {
+        if c.is_alphanumeric() || c == '_' {
+            let mut end = start + c.len_utf8();
+            while let Some(&(index, next)) = chars.peek() {
+                if !next.is_alphanumeric() && next != '_' {
+                    break;
+                }
+                chars.next();
+                end = index + next.len_utf8();
+            }
+            let name = &text[start..end];
+            let canonical = match PrimitiveType::from_name(name) {
+                Some(primitive) => primitive.as_str(),
+                None => name,
+            };
+            out.push_str(canonical);
+        } else if !c.is_whitespace() {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Render a source type spelling the way the ENGINE prints it:
@@ -480,8 +506,8 @@ fn render_type(text: &str) -> String {
 }
 
 /// True when a canonical spelling denotes a type this module is willing to
-/// call different from another. Primitives are safe (no aliasing), and so
-/// is a name pooled as a workspace class, interface or enum. Anything else
+/// call different from another. Primitives are safe after alias normalization,
+/// as is a name pooled as a workspace class, interface or enum. Anything else
 /// — a typedef, a funcdef alias, an engine type, an unresolved name — is
 /// not, because a differing spelling may still be the same type.
 fn type_is_comparable(canonical: &str, scope: &GlobalScope) -> bool {
