@@ -274,3 +274,27 @@ fn gh73_namespace_value_types_preserve_nearest_enum_validation() {
         "{errors:?}"
     );
 }
+
+#[test]
+fn gh73_known_qualified_core_types_keep_precedence_over_nested_names() {
+    let root = plugin("void Good(UI::InputTextCallbackData@ data) { data.SelectAll(); } namespace Qz { namespace UI { funcdef void InputTextCallback(int value); } UI::InputTextCallback@ callback = Good; void Use() { string text; UI::InputText(\"id\", text, 0, callback); } } void Main() {}");
+    let typedb = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .args(["check", "--format", "json", "--typedb-dir"])
+        .arg(typedb)
+        .arg(&*root)
+        .env("HOME", root.join("home"))
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .output()
+        .unwrap();
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).unwrap_or_else(|e| panic!("{e}: {output:?}"));
+    let errors: Vec<_> = report["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["severity"] == "error")
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(output.status.code(), Some(0));
+}
