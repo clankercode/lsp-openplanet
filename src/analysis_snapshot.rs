@@ -109,6 +109,14 @@ impl AnalysisSnapshot {
             let analysis = DocumentAnalysis::analyze(&wf.source, &config.defines);
             let syms = SymbolTable::extract_symbols(fid, analysis.masked_source(), &analysis.file);
             table.set_file_symbols(fid, syms);
+            let canonical = wf.path.canonicalize().unwrap_or_else(|_| wf.path.clone());
+            table.set_file_compile_context(
+                fid,
+                wf.report_diagnostics,
+                load.export_paths.contains(&canonical)
+                    || load.consumer_dependency_paths.contains(&canonical),
+                load.strict_export_paths.contains(&canonical),
+            );
             files.push(SnapshotFile {
                 path: wf.path.clone(),
                 uri: Url::from_file_path(&wf.path).ok(),
@@ -205,6 +213,7 @@ impl AnalysisSnapshot {
             usage_only_sources_complete: true,
             usage_only_unreadable_paths: Vec::new(),
             export_paths: HashSet::new(),
+            consumer_dependency_paths: Default::default(),
             strict_export_paths: HashSet::new(),
         };
         Self::from_load(&load, config)
@@ -238,6 +247,7 @@ impl AnalysisSnapshot {
             usage_only_sources_complete: true,
             usage_only_unreadable_paths: Vec::new(),
             export_paths: HashSet::new(),
+            consumer_dependency_paths: Default::default(),
             strict_export_paths: HashSet::new(),
         };
         Self::from_load(&load, config)
@@ -264,6 +274,7 @@ impl AnalysisSnapshot {
             usage_only_sources_complete: true,
             usage_only_unreadable_paths: Vec::new(),
             export_paths: Default::default(),
+            consumer_dependency_paths: Default::default(),
             strict_export_paths: Default::default(),
         };
         Self::from_load(&load, config)
@@ -735,6 +746,7 @@ mod tests {
             usage_only_sources_complete: false,
             usage_only_unreadable_paths: vec![unreadable.clone()],
             export_paths: Default::default(),
+            consumer_dependency_paths: Default::default(),
             strict_export_paths: Default::default(),
         };
         let snapshot = AnalysisSnapshot::from_load(&load, &LspConfig::default());
@@ -767,6 +779,7 @@ mod tests {
             usage_only_sources_complete: true,
             usage_only_unreadable_paths: Vec::new(),
             export_paths: Default::default(),
+            consumer_dependency_paths: Default::default(),
             strict_export_paths: Default::default(),
         };
         let snapshot = AnalysisSnapshot::from_load(&load, &LspConfig::default());

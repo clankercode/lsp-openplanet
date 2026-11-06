@@ -52,10 +52,11 @@
 # LSP binary sha256: 88f05399c7446da0bd4d1cba932838c7d1317878cb735af2cf7b02fd2bdbc57d
 # Engine: 1.29.14   Probed: 2026-09-01
 #
+# Partial row refresh 2026-11-07: 28b-user-namespace-silent, fresh engine probe and generator run_lsp_on_fixture; LSP sha256 04e31fec2ad0b7c3e54f1f431c5c0ab8e5810b8bdf008ea3b3402d64e8846d7d. Other rows retain their recorded measurements.
 fixture	verdict	build_status	engine_compiled	engine_message	lsp_today	engine_version	probe_date	divergence_for	divergence
 26-export-ns-hint	REJECT	REJECTED	1	Main.as(13,13): Identifier 'PlayerCpInfo' is not a data type | Main.as(15,11): Identifier 'NotARealThing' is not a data type	DIAGNOSES(2)	1.29.14	2026-09-01	-	-
 28-removed-draw-api	REJECT	REJECTED	2	Main.as(20,15): No matching symbol 'Draw::GetWidth' | Main.as(21,15): No matching symbol 'Draw::GetHeight' | Main.as(27,18): No matching symbol 'UI::GetIO'	DIAGNOSES(3)	1.29.14	2026-09-01	-	-
-28b-user-namespace-silent	REJECT	REJECTED	1	Main.as(18,5): No matching symbol 'MyHelpers::NotInDbEither' | Main.as(19,5): No matching symbol 'NotDeclaredAnywhere::Foo'	DIAGNOSES(1)	1.29.14	2026-09-01	-	-
+28b-user-namespace-silent	REJECT	REJECTED	1	Main.as(18,5): No matching symbol 'MyHelpers::NotInDbEither' | Main.as(19,5): No matching symbol 'NotDeclaredAnywhere::Foo'	DIAGNOSES(2)	1.29.14	2026-11-07	-	-
 30-sibling-field-bare-ident	REJECT	REJECTED	1	Main.as(18,41): No matching symbol 'nod' | Main.as(19,13): No matching symbol 'bad'	DIAGNOSES(1)	1.29.14	2026-09-01	-	-
 37a-signed-unsigned-mismatch	ACCEPT-WITH-WARNINGS	CLEAN	1	Main.as(7,16): Signed/Unsigned mismatch	DIAGNOSES(3)	1.29.14	2026-09-01	-	-
 37b-float-truncation	ACCEPT-WITH-WARNINGS	CLEAN	1	Main.as(6,14): Implicit conversion of value is not exact | Main.as(8,13): Float value truncated in implicit conversion to integer	DIAGNOSES(2)	1.29.14	2026-09-01	-	-

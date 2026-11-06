@@ -144,6 +144,9 @@ pub struct FileSymbols {
 pub struct SymbolTable {
     /// file_id → file symbols
     files: HashMap<usize, FileSymbols>,
+    /// Diagnostic ownership and the compilation modules each file joins:
+    /// bit 0 is the defining module, bit 1 is the consumer export module.
+    file_compile_context: HashMap<usize, (bool, u8)>,
     /// name → list of symbols (cross-file)
     global_index: HashMap<String, Vec<(usize, usize)>>, // (file_id, symbol_index)
     /// last `::`-segment → symbols carrying that tail (qualified names only;
@@ -181,6 +184,58 @@ impl SymbolTable {
         let id = self.next_file_id;
         self.next_file_id += 1;
         id
+    }
+
+    /// Preserve loader provenance independently of visibility projections.
+    /// Strict exports and ordinary sources may both be visible while an
+    /// export is checked, but they are not compiled into the same module.
+    pub fn set_file_compile_context(
+        &mut self,
+        file_id: usize,
+        report_diagnostics: bool,
+        exported: bool,
+        strict_export: bool,
+    ) {
+        let modules = if strict_export {
+            2
+        } else if exported {
+            3
+        } else {
+            1
+        };
+        self.file_compile_context
+            .insert(file_id, (report_diagnostics, modules));
+    }
+
+    /// A competing variable in a shared compilation module. Dependencies
+    /// do not publish diagnostics, so their declarations precede the local
+    /// declaration for reporting purposes regardless of pooling order.
+    pub fn has_prior_variable_declaration(&self, name: &str, current_file: usize) -> bool {
+        let current_modules = self
+            .file_compile_context
+            .get(&current_file)
+            .copied()
+            .unwrap_or((true, 1))
+            .1;
+        self.global_index
+            .get(name)
+            .into_iter()
+            .flatten()
+            .any(|&(fid, idx)| {
+                let (reports, modules) = self
+                    .file_compile_context
+                    .get(&fid)
+                    .copied()
+                    .unwrap_or((true, 1));
+                fid != current_file
+                    && modules & current_modules != 0
+                    && (!reports || fid < current_file)
+                    && self
+                        .files
+                        .get(&fid)
+                        .and_then(|f| f.symbols.get(idx))
+                        .is_some_and(|s| matches!(s.kind, SymbolKind::Variable { .. }))
+            })
     }
 
     /// Register symbols from a parsed file. Replaces any previous symbols for this file.
@@ -225,6 +280,7 @@ impl SymbolTable {
     }
 
     pub fn remove_file(&mut self, file_id: usize) {
+        self.file_compile_context.remove(&file_id);
         if self.files.remove(&file_id).is_some() {
             for entries in self.global_index.values_mut() {
                 entries.retain(|(fid, _)| *fid != file_id);
@@ -545,7 +601,10 @@ impl SymbolTable {
                                 // The other STATE-shaped member. B115 fixed
                                 // both, so pooling only fields would rebuild
                                 // the half-blind asymmetry one layer up.
-                                modifiers: state_modifiers(prop.is_private, prop.is_protected),
+                                modifiers: DeclModifiers {
+                                    is_virtual_property: true,
+                                    ..state_modifiers(prop.is_private, prop.is_protected)
+                                },
                                 name: mname,
                                 kind: SymbolKind::Variable {
                                     type_name: type_text,
@@ -760,7 +819,10 @@ impl SymbolTable {
                 let type_text = prop.type_expr.span.text(source).to_string();
                 out.push(Symbol {
                     // As above: always false at file scope, threaded anyway.
-                    modifiers: state_modifiers(prop.is_private, prop.is_protected),
+                    modifiers: DeclModifiers {
+                        is_virtual_property: true,
+                        ..state_modifiers(prop.is_private, prop.is_protected)
+                    },
                     name,
                     kind: SymbolKind::Variable {
                         type_name: type_text,

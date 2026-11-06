@@ -1514,16 +1514,14 @@ fn check_command_issue_repro_28_removed_draw_api_diagnoses() {
     );
 }
 
-/// GH #28 negative guard, narrowed by GH #58: a namespace the checker has
-/// no authoritative surface for stays silent (`NotDeclaredAnywhere::Foo` —
-/// absent from both workspace and typedb), and legal relocated
-/// (`Display::GetWidth`) / known-member (`UI::Begin`) calls stay clean. A
-/// namespace DECLARED in the workspace is authoritative once the dependency
-/// closure is complete, so its unknown member now errors (GH #58).
+/// GH #28 legal-call guards, extended by GH #58 and #70/#71: a complete
+/// workspace can prove both an absent member and an absent namespace invalid.
+/// Known workspace, relocated API and typedb members remain legal. Separate
+/// incomplete-closure tests retain silence when missing sources may declare it.
 #[test]
 fn check_command_issue_repro_28b_user_namespace_stays_silent() {
     let (_, stdout, _) = run_issue_repro_typedb("28b-user-namespace-silent");
-    for line in ["Main.as:17", "Main.as:19", "Main.as:20", "Main.as:21"] {
+    for line in ["Main.as:17", "Main.as:20", "Main.as:21"] {
         assert!(
             !stdout
                 .lines()
@@ -1537,6 +1535,17 @@ fn check_command_issue_repro_28b_user_namespace_stays_silent() {
     assert!(
         flagged,
         "GH #58: an unknown member of a workspace-declared namespace must error; stdout={stdout:?}"
+    );
+    let absent_namespace = stdout
+        .lines()
+        .filter(|line| {
+            line.contains("Main.as:19")
+                && line.contains("No matching symbol 'NotDeclaredAnywhere::Foo'")
+        })
+        .count();
+    assert_eq!(
+        absent_namespace, 1,
+        "GH #70/#71: a complete module must diagnose an absent namespace; stdout={stdout:?}"
     );
 }
 

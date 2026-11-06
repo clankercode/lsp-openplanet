@@ -3,7 +3,7 @@
 //! One path used by CLI `check` and the LSP Backend so dependency symbols
 //! stay consistent across tools.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::config::LspConfig;
@@ -91,6 +91,9 @@ pub struct PluginWorkspaceLoad {
     /// info.toml `[script]` `exports` + `shared_exports`; decls in these
     /// files are public API and exempt from unused-declaration warnings.
     pub export_paths: HashSet<PathBuf>,
+    /// Dependency export files reachable through this plugin's own
+    /// `export_dependencies`; these also join the consumer compilation module.
+    pub consumer_dependency_paths: HashSet<PathBuf>,
     /// GH #61: own-module `.as` files the checked set OMITTED — dropped by
     /// gitignore honoring (GH #60), or filtered out by `source_paths` /
     /// `ignore_paths` — read for USAGE RECORDING ONLY.
@@ -373,6 +376,7 @@ fn load_plugin_workspace_with_source_reader(
         usage_only_sources_complete,
         usage_only_unreadable_paths,
         export_paths,
+        consumer_dependency_paths: dep.consumer_dependency_paths,
         strict_export_paths,
     })
 }
@@ -481,6 +485,7 @@ pub fn merge_open_documents(
         usage_only_sources_complete: usage_only_unreadable_paths.is_empty(),
         usage_only_unreadable_paths,
         export_paths: base.export_paths.clone(),
+        consumer_dependency_paths: base.consumer_dependency_paths.clone(),
         strict_export_paths: base.strict_export_paths.clone(),
     }
 }
@@ -497,6 +502,7 @@ fn paths_equal(a: &Path, b: &Path) -> bool {
 
 #[derive(Debug, Default)]
 struct DepLoad {
+    consumer_dependency_paths: HashSet<PathBuf>,
     loaded_files: Vec<(PathBuf, String)>,
     missing_required: Vec<String>,
     /// Declared dependencies that failed to resolve and DO break the module
@@ -549,6 +555,10 @@ fn load_dependency_exports(
         return Ok(result);
     };
 
+    // Keep aliases and re-export edges separately from traversal deduplication:
+    // a dependency first loaded privately may later be re-exported by another ID.
+    let mut identities_by_id = HashMap::new();
+    let mut export_surfaces = HashMap::new();
     let mut seen_ids = HashSet::new();
     let mut seen_plugin_identities = HashSet::new();
     let mut seen_files = HashSet::new();
@@ -590,6 +600,21 @@ fn load_dependency_exports(
                 let Some(identity) = plugin_identity(&resolved.manifest, &dep_id) else {
                     continue;
                 };
+                identities_by_id.insert(dep_id.clone(), identity.clone());
+                export_surfaces.entry(identity.clone()).or_insert_with(|| {
+                    let paths = resolved
+                        .export_files
+                        .iter()
+                        .map(|(path, _)| path.canonicalize().unwrap_or_else(|_| path.clone()))
+                        .collect::<Vec<_>>();
+                    let reexports = resolved
+                        .manifest
+                        .script
+                        .as_ref()
+                        .map(|script| script.export_dependencies.clone())
+                        .unwrap_or_default();
+                    (paths, reexports)
+                });
                 if !seen_plugin_identities.insert(identity) {
                     continue;
                 }
@@ -642,6 +667,25 @@ fn load_dependency_exports(
                     ));
                 }
             }
+        }
+    }
+
+    // Only root export_dependencies seed consumer visibility. Private imports
+    // contribute to the defining module but do not leak into its strict exports.
+    let mut pending = script.export_dependencies.clone();
+    let mut reached = HashSet::new();
+    while let Some(id) = pending.pop() {
+        let Some(identity) = identities_by_id.get(&id) else {
+            continue;
+        };
+        if !reached.insert(identity.clone()) {
+            continue;
+        }
+        if let Some((paths, reexports)) = export_surfaces.get(identity) {
+            result
+                .consumer_dependency_paths
+                .extend(paths.iter().cloned());
+            pending.extend(reexports.iter().cloned());
         }
     }
 

@@ -257,6 +257,9 @@ pub enum TypeDiagnosticKind {
     AlreadyDeclared {
         name: String,
     },
+    /// GH #73: script accessor values cannot supply the reference needed
+    /// by increment/decrement. Compound assignments compile in OP1.29.14.
+    PropertyCombinedReadWrite,
     /// Game parity (GH #37): statement(s) after a terminating statement
     /// (return/break/continue, or an if-else where both branches terminate)
     /// inside the same block. The game warns `Unreachable code` once per
@@ -503,6 +506,9 @@ impl TypeDiagnostic {
             ),
             TypeDiagnosticKind::AlreadyDeclared { name } => {
                 format!("'{name}' is already declared")
+            }
+            TypeDiagnosticKind::PropertyCombinedReadWrite => {
+                "Invalid reference. Property accessors cannot be used in combined read/write operations".to_string()
             }
             TypeDiagnosticKind::UnreachableCode => "Unreachable code".to_string(),
             TypeDiagnosticKind::NoImplicitConversion { from, to } => {
@@ -762,6 +768,8 @@ pub struct Checker<'a> {
     /// top-level (free) function declarations in this file. Used by GH #37
     /// slice 3 to flag `DuplicateFunction` at the second and later decl.
     seen_function_sigs: std::collections::HashSet<(String, String)>,
+    /// Namespace-qualified global declarators already visited in this file.
+    seen_global_variables: std::collections::HashSet<String>,
     file_id: Option<usize>,
     /// Scoped suppression for the `+`-mix arm of SignedUnsignedMismatch
     /// (GH #37): while walking the operands of a NON-relational arithmetic
@@ -810,6 +818,7 @@ impl<'a> Checker<'a> {
             span_expr_types: std::collections::HashMap::new(),
             record_types: false,
             seen_function_sigs: std::collections::HashSet::new(),
+            seen_global_variables: std::collections::HashSet::new(),
             file_id: None,
             arith_suppress_add_mix: 0,
             used_names: None,
@@ -1625,6 +1634,7 @@ impl<'a> Checker<'a> {
         }
 
         let mut members: Vec<(String, TypeRepr)> = Vec::new();
+        let mut field_names = std::collections::HashSet::new();
         for member in &cls.members {
             match member {
                 ClassMember::Field(var) => {
@@ -1642,7 +1652,15 @@ impl<'a> Checker<'a> {
                         repr
                     };
                     for d in &var.declarators {
-                        members.push((d.name.text(self.source).to_string(), ty.clone()));
+                        let name = d.name.text(self.source).to_string();
+                        if !field_names.insert(name.clone()) {
+                            self.diagnostics.push(TypeDiagnostic {
+                                span: d.name.span,
+                                kind: TypeDiagnosticKind::AlreadyDeclared { name },
+                            });
+                        } else {
+                            members.push((name, ty.clone()));
+                        }
                     }
                 }
                 ClassMember::Property(prop) => {
@@ -2085,6 +2103,23 @@ impl<'a> Checker<'a> {
         // itself is never referenced (unused-decl analysis).
         self.record_type_repr_uses(&ty);
         for d in &var.declarators {
+            let name = d.name.text(self.source).to_string();
+            let qualified = match self.current_namespace_qualified() {
+                Some(ns) => format!("{ns}::{name}"),
+                None => name.clone(),
+            };
+            let seen_here = !self.seen_global_variables.insert(qualified.clone());
+            let seen_in_prior_file = self.file_id.is_some_and(|file_id| {
+                self.scope
+                    .workspace()
+                    .has_prior_variable_declaration(&qualified, file_id)
+            });
+            if seen_here || seen_in_prior_file {
+                self.diagnostics.push(TypeDiagnostic {
+                    span: d.name.span,
+                    kind: TypeDiagnosticKind::AlreadyDeclared { name },
+                });
+            }
             if let Some(init) = &d.init {
                 let init_ty = self.expr_type(init);
                 self.check_funcdef_binding(&ty, init, &init_ty);
@@ -3027,12 +3062,8 @@ impl<'a> Checker<'a> {
     /// the resolver makes — rather than a second lookup that could disagree
     /// with it about what the set contains.
     ///
-    /// Credits and types the call EXACTLY as the `has_global_ident` arm it
-    /// stands in front of: same `record_value_use_variants`, same
-    /// `TypeRepr::Error` sentinel. Returning the resolver's own type instead
-    /// would be a second, unmeasured change riding along on this one — the
-    /// unique-overload winner's return type would start flowing into member
-    /// chains and hover, which is not what this ticket measured.
+    /// Resolve the same overload set used for argument checking and retain
+    /// a unique winner's contextual return type for downstream member chains.
     fn try_workspace_overload_set_call(
         &mut self,
         display_name: &str,
@@ -3044,14 +3075,13 @@ impl<'a> Checker<'a> {
             return None;
         }
         self.record_value_use_variants(qualified);
-        self.resolve_workspace_function_call(
+        Some(self.resolve_workspace_function_call(
             display_name,
             qualified,
             args,
             callee_span,
             TypeRepr::Error(String::new()),
-        );
-        Some(TypeRepr::Error(String::new()))
+        ))
     }
 
     fn resolve_workspace_function_call(
@@ -5160,10 +5190,24 @@ impl<'a> Checker<'a> {
                     self.walk_args(args);
                     return TypeRepr::Error(String::new());
                 }
-                // Emit an undefined-ident diagnostic on the callee span.
+                // GH #27: only suggest a measured migration after ordinary
+                // resolution has failed, and only when this target provides
+                // its successor. A workspace/local declaration wins above.
+                let relocation = removed_api_hint(&name).filter(|successor| {
+                    self.scope
+                        .external()
+                        .is_some_and(|idx| idx.lookup_function(successor).is_some())
+                });
+                let kind = match relocation {
+                    Some(successor) => TypeDiagnosticKind::NoMatchingSymbol {
+                        qualified: name.clone(),
+                        hint: Some(SymbolHint::Relocation(successor.to_string())),
+                    },
+                    None => TypeDiagnosticKind::UndefinedIdentifier(name.clone()),
+                };
                 self.diagnostics.push(TypeDiagnostic {
                     span: callee.span,
-                    kind: TypeDiagnosticKind::UndefinedIdentifier(name.clone()),
+                    kind,
                 });
                 self.walk_args(args);
                 TypeRepr::Error(name)
@@ -5776,8 +5820,9 @@ impl<'a> Checker<'a> {
     ///    file may contribute the member. The five conditions behind that
     ///    flag are enumerated on
     ///    `workspace::load::PluginWorkspaceLoad::dependency_closure_complete`.
-    /// 4. `Ns` must be declared as a namespace (a class is not one —
-    ///    AngelScript has no statics, so `MyClass::Thing()` stays silent).
+    /// 4. Known non-namespace qualifiers stay outside this rule (notably
+    ///    class-qualified calls); an absent namespace is an error when the
+    ///    complete module contains neither it nor the requested member.
     /// 5. Nothing of ANY kind may match under it — function, class,
     ///    interface, enum, enum value, funcdef, namespace or global
     ///    variable, plus `get_`/`set_` virtual-property accessors.
@@ -5800,7 +5845,12 @@ impl<'a> Checker<'a> {
         if !self.scope.workspace_closure_complete() {
             return None;
         }
-        if !self.scope.workspace_namespace_declared(ns) {
+        // A complete module can also prove that the namespace itself is
+        // absent (GH #70/#71). Keep known non-namespace qualifiers, notably
+        // classes, outside this free-function rule.
+        if !self.scope.workspace_namespace_declared(ns)
+            && (self.scope.has_type(ns) || self.scope.workspace_declares_any(ns))
+        {
             return None;
         }
         if self.workspace_ns_resolves(ns, member) {
@@ -5812,6 +5862,7 @@ impl<'a> Checker<'a> {
             let relative_ns = format!("{prefix}::{ns}");
             if self.scope.workspace_namespace_declared(&relative_ns)
                 || self.workspace_ns_resolves(&relative_ns, member)
+                || self.scope.has_type(&relative_ns)
             {
                 return None;
             }
@@ -5901,6 +5952,63 @@ impl<'a> Checker<'a> {
                 },
             });
         }
+    }
+
+    /// Classify the actual target, not values reached through it: `P[i]++`
+    /// writes an element, whereas `P++` requires a reference to the accessor.
+    fn check_combined_property_operation(&mut self, target: &Expr) {
+        let property = match &target.kind {
+            ExprKind::Ident(ident) => {
+                let name = ident.text(self.source);
+                if self.lookup_local(name).is_some() {
+                    return;
+                }
+                let member = self.current_class().and_then(|class| {
+                    self.scope
+                        .workspace_member_is_virtual_property(&class.name, name)
+                });
+                member.or_else(|| self.global_value_is_virtual_property(name))
+            }
+            ExprKind::NamespaceAccess { path } => {
+                let name = path.to_string(self.source);
+                if path.span.text(self.source).starts_with("::") {
+                    self.scope.workspace_value_is_virtual_property(&name)
+                } else {
+                    self.global_value_is_virtual_property(&name)
+                }
+            }
+            ExprKind::Member { object, member } => {
+                // The ordinary expression walk already retained receiver
+                // diagnostics. Reuse its type without emitting them twice.
+                let mark = self.diagnostics.len();
+                let ty = self.expr_type(object);
+                self.diagnostics.truncate(mark);
+                Self::base_type_name(&ty).and_then(|class| {
+                    self.scope
+                        .workspace_member_is_virtual_property(&class, member.text(self.source))
+                })
+            }
+            _ => None,
+        };
+        if property == Some(true) {
+            self.diagnostics.push(TypeDiagnostic {
+                span: target.span,
+                kind: TypeDiagnosticKind::PropertyCombinedReadWrite,
+            });
+        }
+    }
+
+    fn global_value_is_virtual_property(&self, name: &str) -> Option<bool> {
+        for depth in (1..=self.namespace_stack.len()).rev() {
+            let ns = self.namespace_stack[..depth].join("::");
+            if let Some(property) = self
+                .scope
+                .workspace_value_is_virtual_property(&format!("{ns}::{name}"))
+            {
+                return Some(property);
+            }
+        }
+        self.scope.workspace_value_is_virtual_property(name)
     }
 
     fn expr_type_inner(&mut self, expr: &Expr) -> TypeRepr {
@@ -6091,7 +6199,10 @@ impl<'a> Checker<'a> {
                             let rs = signedness_of(self, rhs);
                             if let (Some(ls), Some(rs)) = (ls, rs) {
                                 if ls != rs {
-                                    emit_span = Some(expr.span);
+                                    emit_span = Some(
+                                        comparison_operator_span(self.source, expr)
+                                            .unwrap_or(expr.span),
+                                    );
                                 }
                             }
                         }
@@ -6124,6 +6235,9 @@ impl<'a> Checker<'a> {
             }
             ExprKind::Unary { op, expr } => {
                 let operand_ty = self.expr_type(expr);
+                if matches!(op, UnaryOp::Inc | UnaryOp::Dec) {
+                    self.check_combined_property_operation(expr);
+                }
                 // AngelScript: `!` is bool-only. Game rejects non-bool
                 // operands with "Illegal operation on this datatype"
                 // (OP 1.29.5; tm-control-mcp AsyncDispatch.as:136).
@@ -6171,7 +6285,11 @@ impl<'a> Checker<'a> {
                 }
                 operand_ty
             }
-            ExprKind::Postfix { expr, .. } => self.expr_type(expr),
+            ExprKind::Postfix { expr, .. } => {
+                let ty = self.expr_type(expr);
+                self.check_combined_property_operation(expr);
+                ty
+            }
             ExprKind::Call { callee, args } => {
                 // `call_type` is responsible for walking each `args` entry
                 // exactly once via `expr_type`. Do NOT pre-walk here — the
@@ -6431,11 +6549,27 @@ impl<'a> Checker<'a> {
                     // `namespace Repro`, a written `StatusKind::B` refers
                     // to `Repro::StatusKind::B` in the pooled table.
                     for depth in (0..=self.namespace_stack.len()).rev() {
+                        if depth > 0 && path.span.text(self.source).starts_with("::") {
+                            continue;
+                        }
                         let candidate = if depth == 0 {
                             qual.clone()
                         } else {
                             format!("{}::{}", self.namespace_stack[..depth].join("::"), qual)
                         };
+                        // A nearest enum qualifier owns its member lookup;
+                        // a miss must not fall back to an outer enum/value.
+                        if candidate
+                            .rsplit_once("::")
+                            .is_some_and(|(owner, _)| self.scope.enum_member_names(owner).is_some())
+                        {
+                            self.record_value_use_variants(&candidate);
+                            return self.enum_member_type(&qual, expr.span);
+                        }
+                        if let Some(ty) = self.scope.lookup_global_value_type(&candidate) {
+                            self.record_value_use_variants(&candidate);
+                            return ty;
+                        }
                         if self.scope.has_global_ident(&candidate) {
                             self.record_value_use_variants(&candidate);
                             break;
@@ -6497,6 +6631,8 @@ fn is_integer(p: PrimitiveType) -> bool {
 /// `UI::*` — the namespace is absent from the 1.29.5 typedb entirely.
 fn removed_api_hint(qual: &str) -> Option<&'static str> {
     match qual {
+        "StripFormatCodes" => Some("Text::StripFormatCodes"),
+        "ColoredString" => Some("Text::OpenplanetFormatCodes"),
         "Draw::GetWidth" => Some("Display::GetWidth"),
         "Draw::GetHeight" => Some("Display::GetHeight"),
         "Draw::MeasureString" => Some("UI::MeasureString"),
@@ -6509,6 +6645,31 @@ fn removed_api_hint(qual: &str) -> Option<&'static str> {
         "string::Repeat" => Some("Text::Repeat"),
         _ => None,
     }
+}
+
+/// Locate a comparison's operator in the operand gap. Lexing the gap skips
+/// comments and prevents an operator-like string in trivia from becoming the
+/// diagnostic anchor. Shared with quick fixes so a token-sized diagnostic
+/// still selects exactly the binary expression whose operands need edits.
+pub(crate) fn comparison_operator_span(source: &str, expr: &Expr) -> Option<Span> {
+    let ExprKind::Binary { lhs, op, rhs } = &expr.kind else {
+        return None;
+    };
+    let expected = match op {
+        BinOp::Lt => TokenKind::Lt,
+        BinOp::LtEq => TokenKind::LtEq,
+        BinOp::Gt => TokenKind::Gt,
+        BinOp::GtEq => TokenKind::GtEq,
+        BinOp::Eq => TokenKind::EqEq,
+        BinOp::NotEq => TokenKind::BangEq,
+        _ => return None,
+    };
+    let start = lhs.span.end;
+    let gap = source.get(start as usize..rhs.span.start as usize)?;
+    let token = crate::lexer::tokenize_filtered(gap)
+        .into_iter()
+        .find(|token| token.kind == expected)?;
+    Some(Span::new(start + token.span.start, start + token.span.end))
 }
 
 /// Levenshtein distance capped at `max` — small helper for near-name
@@ -11758,11 +11919,11 @@ void Main() {
         );
     }
 
-    /// A namespace absent from both the workspace and the typedb keeps the
-    /// GH #28 silence — there is nothing authoritative to check against.
+    /// An incomplete module cannot prove an absent namespace is undefined.
+    /// The complete-module case is covered through the CLI by GH #71.
     #[test]
     fn undeclared_namespace_stays_silent() {
-        let diags = check_closed_workspace("void Main() { NotDeclaredAnywhere::Foo(); }");
+        let diags = check("void Main() { NotDeclaredAnywhere::Foo(); }");
         assert!(
             no_matching_symbols(&diags).is_empty(),
             "undeclared namespaces must stay silent, got {:?}",

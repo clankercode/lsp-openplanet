@@ -1000,3 +1000,20 @@ Path-based attribution counts those as *foreign*, though the probe's own code
 caused them. It fails SAFE — AMBIGUOUS, never a wrong verdict — but those rows
 cannot be scored, which is why the decisive discriminator uses **no dependency
 at all**. It does not need one: shared types are engine-wide already.
+
+GH #73 was checked again against Openplanet 1.29.14 on 2026-11-07. The
+[84-case property operator corpus](gh73-property-operators.tsv) distinguishes
+prefix/postfix `++` and `--` (24 rejections) from compound assignments with
+both accessors present (60 accepted cases). Targets include implicit and
+explicit `this`, a global property, a namespace property, an instance member,
+and property-block syntax. The older B061 fixture still compiles cleanly;
+its `Session::Status += 1` is a legal control. Rejecting every operation that
+reads and writes a property would introduce false positives.
+
+Reproduce with `python3 scripts/probe_property_operators.py --tsv
+docs/probes/gh73-property-operators.tsv`. This requires the live game. The
+script creates its disposable plugin beneath the Openplanet plugin workspace,
+compares staged bytes before loading, captures fresh log windows and source
+hashes in `target/gh73-property-operators-evidence.json`, then unloads and
+removes its staging. Each accepted group must load cleanly; a rejected group
+must provide an attributed error for every case before it can be recorded.

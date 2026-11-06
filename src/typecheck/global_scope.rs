@@ -1809,6 +1809,9 @@ impl<'a> GlobalScope<'a> {
                 ..
             } = &s.kind
             {
+                let parsed_return = TypeRepr::parse_type_string(return_type);
+                let contextual_return =
+                    self.qualify_workspace_declared_type(parsed_return.clone(), &s.name);
                 out.push(OverloadSig {
                     param_names: params.iter().map(|(name, _)| Some(name.clone())).collect(),
                     param_types: params.iter().map(|(_, ty_text)| ty_text.clone()).collect(),
@@ -1824,7 +1827,11 @@ impl<'a> GlobalScope<'a> {
                         .map(|(_, ty_text)| param_mode_from_text(ty_text))
                         .collect(),
                     min_args: *min_args,
-                    return_type: return_type.clone(),
+                    return_type: if contextual_return == parsed_return {
+                        return_type.clone()
+                    } else {
+                        contextual_return.display()
+                    },
                 });
             }
         }
@@ -2514,10 +2521,16 @@ impl<'a> GlobalScope<'a> {
             for s in candidates {
                 match &s.kind {
                     SymbolKind::Variable { type_name } => {
-                        return Some(TypeRepr::parse_type_string(type_name));
+                        return Some(self.qualify_workspace_declared_type(
+                            TypeRepr::parse_type_string(type_name),
+                            &name,
+                        ));
                     }
                     SymbolKind::Function { return_type, .. } => {
-                        return Some(TypeRepr::parse_type_string(return_type));
+                        return Some(self.qualify_workspace_declared_type(
+                            TypeRepr::parse_type_string(return_type),
+                            &name,
+                        ));
                     }
                     _ => {}
                 }
@@ -2525,6 +2538,97 @@ impl<'a> GlobalScope<'a> {
             // Not found on this class — ascend to its base classes.
             for parent in self.workspace_class_parents(&name) {
                 queue.push_back(self.normalize_workspace_class_name_in_context(&parent, &name));
+            }
+        }
+        None
+    }
+
+    /// Pooled declarations retain their written type spelling. Resolve
+    /// named parts in the declaring owner's namespace before a value leaves
+    /// that context (including inherited members and accessor returns).
+    pub(crate) fn qualify_workspace_declared_type(&self, ty: TypeRepr, owner: &str) -> TypeRepr {
+        let qualify = |name: String| {
+            if let Some(global) = name.strip_prefix("::") {
+                return global.to_string();
+            }
+            // A known qualified spelling resolves as written, including a
+            // Core type shadowed by a nested workspace declaration.
+            if name.contains("::") && self.names_a_known_type(&name) {
+                return name;
+            }
+            let mut context = owner;
+            while let Some((ns, _)) = context.rsplit_once("::") {
+                let candidate = format!("{ns}::{name}");
+                if self
+                    .lookup_workspace(&candidate)
+                    .iter()
+                    .any(|s| declares_type(&s.kind))
+                {
+                    return candidate;
+                }
+                context = ns;
+            }
+            name
+        };
+        match ty {
+            TypeRepr::Named(name) => TypeRepr::Named(qualify(name)),
+            TypeRepr::Funcdef(name) => TypeRepr::Funcdef(qualify(name)),
+            TypeRepr::Handle(inner) => TypeRepr::Handle(Box::new(
+                self.qualify_workspace_declared_type(*inner, owner),
+            )),
+            TypeRepr::Const(inner) => TypeRepr::Const(Box::new(
+                self.qualify_workspace_declared_type(*inner, owner),
+            )),
+            TypeRepr::Array(inner) => TypeRepr::Array(Box::new(
+                self.qualify_workspace_declared_type(*inner, owner),
+            )),
+            TypeRepr::Generic { base, args } => TypeRepr::Generic {
+                base: qualify(base),
+                args: args
+                    .into_iter()
+                    .map(|arg| self.qualify_workspace_declared_type(arg, owner))
+                    .collect(),
+            },
+            other => other,
+        }
+    }
+
+    /// Whether a workspace value denotes accessor sugar. `None` means
+    /// neither the value nor its accessors are declared in this scope.
+    pub fn workspace_value_is_virtual_property(&self, qualified: &str) -> Option<bool> {
+        let exact = self.lookup_workspace(qualified);
+        if !exact.is_empty() {
+            return Some(exact.iter().any(|s| s.modifiers.is_virtual_property));
+        }
+        ["get_", "set_"].iter().find_map(|prefix| {
+            self.lookup_workspace(&qualified_virtual_name(qualified, prefix))
+                .iter()
+                .any(|s| matches!(s.kind, SymbolKind::Function { .. }))
+                .then_some(true)
+        })
+    }
+
+    /// Resolve fields and accessors together, nearest owner first, so an
+    /// own field hides an inherited virtual property and vice versa.
+    pub fn workspace_member_is_virtual_property(
+        &self,
+        class_name: &str,
+        member: &str,
+    ) -> Option<bool> {
+        let mut seen = std::collections::HashSet::new();
+        let mut queue =
+            std::collections::VecDeque::from([self.normalize_workspace_class_name(class_name)]);
+        while let Some(owner) = queue.pop_front() {
+            if !seen.insert(owner.clone()) {
+                continue;
+            }
+            if let Some(property) =
+                self.workspace_value_is_virtual_property(&format!("{owner}::{member}"))
+            {
+                return Some(property);
+            }
+            for parent in self.workspace_class_parents(&owner) {
+                queue.push_back(self.normalize_workspace_class_name_in_context(&parent, &owner));
             }
         }
         None
@@ -2588,7 +2692,10 @@ impl<'a> GlobalScope<'a> {
             }
             match &s.kind {
                 SymbolKind::Variable { type_name } => {
-                    return Some(TypeRepr::parse_type_string(type_name));
+                    return Some(self.qualify_workspace_declared_type(
+                        TypeRepr::parse_type_string(type_name),
+                        &s.name,
+                    ));
                 }
                 SymbolKind::Function { .. } => {
                     return Some(TypeRepr::Funcdef(s.name.clone()));
@@ -2628,7 +2735,10 @@ impl<'a> GlobalScope<'a> {
         if let Some(s) = self.lookup_workspace_function_property(qualified) {
             return match &s.kind {
                 SymbolKind::Function { return_type, .. } => {
-                    Some(TypeRepr::parse_type_string(return_type))
+                    Some(self.qualify_workspace_declared_type(
+                        TypeRepr::parse_type_string(return_type),
+                        &s.name,
+                    ))
                 }
                 _ => Some(TypeRepr::Error(String::new())),
             };

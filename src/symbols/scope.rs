@@ -53,6 +53,9 @@ use crate::lexer::Span;
 /// filtering rather than one of two.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DeclModifiers {
+    /// Property-block syntax (`T P { get {...} set {...} }`), whose
+    /// pooled value type otherwise looks identical to an ordinary field.
+    pub is_virtual_property: bool,
     /// `shared` — the cross-plugin entity mechanism, on a function, class,
     /// interface, enum or funcdef. B087 needed this and had to walk the
     /// AST for it.
