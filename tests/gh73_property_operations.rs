@@ -115,3 +115,162 @@ fn gh73_absolute_globals_do_not_resolve_through_an_enclosing_namespace() {
         }
     }
 }
+
+#[test]
+fn gh73_cross_file_member_types_keep_their_declaring_namespace() {
+    for (global_member, nested_member, expected) in [
+        (
+            "int get_P() { return 0; } void set_P(int v) {}",
+            "int P;",
+            0,
+        ),
+        (
+            "int P;",
+            "int get_P() { return 0; } void set_P(int v) {}",
+            1,
+        ),
+    ] {
+        for (declarations, receiver) in [
+            ("class Box { C child; }", "b.child"),
+            ("class Box { C@ child; }", "b.child"),
+            ("class Box { C@ get_child() { return null; } }", "b.child"),
+            ("class Box { array<C@> children; }", "b.children[0]"),
+            (
+                "class Box { array<C@>@ get_children() { return null; } }",
+                "b.children[0]",
+            ),
+            (
+                "class Parent { C@ child; } class Box : Parent {}",
+                "b.child",
+            ),
+            (
+                "class Box { C@ GetChild() { return null; } }",
+                "b.GetChild()",
+            ),
+        ] {
+            let root = plugin(&format!("void Main() {{ N::Box b; {receiver}.P++; }}"));
+            fs::write(root.join("Types.as"), format!("class C {{ {global_member} }} namespace N {{ class C {{ {nested_member} }} {declarations} }}")).unwrap();
+            let errors = check(&root, &[]);
+            assert_eq!(
+                errors.len(),
+                expected,
+                "global={global_member}/{declarations}: {errors:?}"
+            );
+            assert!(errors.iter().all(|d| d["message"] == "Invalid reference. Property accessors cannot be used in combined read/write operations"));
+        }
+    }
+}
+
+#[test]
+fn gh73_cross_file_factories_and_globals_keep_their_declaring_namespace() {
+    let mut results = Vec::new();
+    for (global_member, nested_member, expected) in [
+        (
+            "int get_P() { return 0; } void set_P(int v) {}",
+            "int P;",
+            0,
+        ),
+        (
+            "int P;",
+            "int get_P() { return 0; } void set_P(int v) {}",
+            1,
+        ),
+    ] {
+        for (declarations, receiver) in [
+            ("C@ Make() { return null; }", "N::Make()"),
+            (
+                "C@ Make() { return null; } C@ Make(int v) { return null; }",
+                "N::Make(1)",
+            ),
+            ("C@ Value;", "N::Value"),
+            ("C@ get_Value() { return null; }", "N::Value"),
+            ("C@ Value { get { return null; } }", "N::Value"),
+            ("array<C@>@ Make() { return null; }", "N::Make()[0]"),
+        ] {
+            let root = plugin(&format!("void Main() {{ {receiver}.P++; }}"));
+            fs::write(root.join("Types.as"), format!("class C {{ {global_member} }} namespace N {{ class C {{ {nested_member} }} {declarations} }}")).unwrap();
+            let errors = check(&root, &[]);
+            assert!(errors.iter().all(|d| d["message"] == "Invalid reference. Property accessors cannot be used in combined read/write operations"), "{declarations}: {errors:?}");
+            results.push((declarations, expected, errors.len()));
+        }
+    }
+    assert!(
+        results
+            .iter()
+            .all(|(_, expected, actual)| expected == actual),
+        "{results:?}"
+    );
+}
+
+#[test]
+fn gh73_lexical_types_preserve_local_parameter_and_same_file_member_owners() {
+    let mut results = Vec::new();
+    for (global_member, nested_member, expected) in [
+        (
+            "int get_P() { return 0; } void set_P(int v) {}",
+            "int P;",
+            0,
+        ),
+        (
+            "int P;",
+            "int get_P() { return 0; } void set_P(int v) {}",
+            1,
+        ),
+    ] {
+        for target in ["b.child", "b.Make()", "local", "param"] {
+            let root = plugin(&format!("class C {{ {global_member} }} namespace N {{ class C {{ {nested_member} }} class Box {{ C child; C@ Make() {{ return null; }} }} void Use(C@ param) {{ Box b; C local; {target}.P++; }} }} void Main() {{}}"));
+            let errors = check(&root, &[]);
+            assert!(errors.iter().all(|d| d["message"] == "Invalid reference. Property accessors cannot be used in combined read/write operations"), "{target}: {errors:?}");
+            results.push((target, expected, errors.len()));
+        }
+    }
+    assert!(
+        results
+            .iter()
+            .all(|(_, expected, actual)| expected == actual),
+        "{results:?}"
+    );
+    let root = plugin("funcdef void Callback(); namespace N { funcdef int Callback(); void Sink(int value) {} void Use(Callback@ cb) { Sink(cb()); } } void Main() {}");
+    let errors = check(&root, &[]);
+    assert!(
+        errors.is_empty(),
+        "lexical funcdefs must remain callable: {errors:?}"
+    );
+}
+
+#[test]
+fn gh73_inherited_overload_returns_keep_the_winning_declaration_namespace() {
+    for (declaring_member, caller_member, expected) in [
+        (
+            "int P;",
+            "int get_P() { return 0; } void set_P(int v) {}",
+            0,
+        ),
+        (
+            "int get_P() { return 0; } void set_P(int v) {}",
+            "int P;",
+            1,
+        ),
+    ] {
+        let root = plugin(&format!("namespace M {{ class C {{ {declaring_member} }} class Root {{ C@ Make() {{ return null; }} C@ Make(int v) {{ return null; }} }} }} namespace N {{ class C {{ {caller_member} }} class Base : M::Root {{}} class Child : Base {{ void Use() {{ N::Base::Make(1).P++; }} }} }} void Main() {{}}"));
+        let errors = check(&root, &[]);
+        assert_eq!(errors.len(), expected, "{errors:?}");
+        assert!(errors.iter().all(|d| d["message"] == "Invalid reference. Property accessors cannot be used in combined read/write operations"));
+    }
+}
+
+#[test]
+fn gh73_namespace_value_types_preserve_nearest_enum_validation() {
+    let root = plugin(
+        "enum E { X } namespace N { enum E { Y } void Use() { int value = E::X; } } void Main() {}",
+    );
+    let errors = check(&root, &[]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("No matching symbol 'E::X'"),
+        "{errors:?}"
+    );
+}
