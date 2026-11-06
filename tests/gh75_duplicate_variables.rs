@@ -105,3 +105,49 @@ fn gh75_distinct_owners_inheritance_and_profile_alternatives_are_legal() {
     assert_eq!(errors.len(), 1, "{errors:?}");
     assert_eq!(errors[0]["line"], 3);
 }
+
+#[test]
+fn gh75_own_strict_exports_do_not_conflict_with_the_defining_module() {
+    for (ordinary, exported) in [("A.as", "Z_Exports.as"), ("Z.as", "A_Exports.as")] {
+        let root = plugin();
+        fs::write(root.join("info.toml"), format!("[meta]\nname = \"Duplicates\"\nversion = \"0.1.0\"\n[script]\nexports = [\"{exported}\"]\n")).unwrap();
+        fs::write(root.join(ordinary), "int x; void Main() {}").unwrap();
+        fs::write(root.join(exported), "int x;").unwrap();
+        let (status, errors) = check(&root, &[]);
+        assert_eq!(status, 0, "{ordinary}/{exported}: {errors:?}");
+        assert!(errors.is_empty(), "{ordinary}/{exported}: {errors:?}");
+    }
+}
+
+#[test]
+fn gh75_consumer_globals_conflict_with_non_reporting_dependency_exports() {
+    for kind in ["exports", "shared_exports"] {
+        let root = plugin();
+        let dependency = root.join("plugins/Dep");
+        fs::create_dir_all(&dependency).unwrap();
+        fs::write(
+            root.join("info.toml"),
+            "[meta]\nname = \"Consumer\"\nversion = \"0.1.0\"\n[script]\ndependencies = [\"Dep\"]\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("Main.as"),
+            "namespace N { int x; } void Main() {}",
+        )
+        .unwrap();
+        fs::write(
+            dependency.join("info.toml"),
+            format!(
+                "[meta]\nname = \"Dep\"\nversion = \"0.1.0\"\n[script]\n{kind} = [\"Api.as\"]\n"
+            ),
+        )
+        .unwrap();
+        fs::write(dependency.join("Api.as"), "namespace N { int x; }").unwrap();
+        let plugins = root.join("plugins");
+        let (status, errors) = check(&root, &["--plugins-dir", plugins.to_str().unwrap()]);
+        assert_eq!(status, 1, "{kind}: {errors:?}");
+        assert_eq!(errors.len(), 1, "{kind}: {errors:?}");
+        assert_eq!(errors[0]["path"], "Main.as");
+        assert_eq!(errors[0]["message"], "'x' is already declared");
+    }
+}

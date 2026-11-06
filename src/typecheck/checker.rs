@@ -20,7 +20,6 @@ use super::resolver::TypeResolver;
 use crate::lexer::token::TokenKind;
 use crate::lexer::Span;
 use crate::parser::ast::*;
-use crate::symbols::scope::SymbolKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypeDiagnosticSeverity {
@@ -2104,12 +2103,11 @@ impl<'a> Checker<'a> {
                 None => name.clone(),
             };
             let seen_here = !self.seen_global_variables.insert(qualified.clone());
-            let seen_in_prior_file =
-                self.file_id.is_some_and(|file_id| {
-                    self.scope.workspace().lookup(&qualified).iter().any(|s| {
-                        s.file_id < file_id && matches!(s.kind, SymbolKind::Variable { .. })
-                    })
-                });
+            let seen_in_prior_file = self.file_id.is_some_and(|file_id| {
+                self.scope
+                    .workspace()
+                    .has_prior_variable_declaration(&qualified, file_id)
+            });
             if seen_here || seen_in_prior_file {
                 self.diagnostics.push(TypeDiagnostic {
                     span: d.name.span,
