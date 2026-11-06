@@ -324,8 +324,14 @@ impl Backend {
     pub async fn reload_config_from_disk(&self) {
         let root_path = self.workspace_root.read().await.clone();
         let init_options = self.init_options.read().await.clone();
-        self.reshard_from_folders(root_path.as_deref(), init_options.as_ref(), true, true)
-            .await;
+        self.reshard_from_folders(
+            root_path.as_deref(),
+            init_options.as_ref(),
+            true,
+            true,
+            false,
+        )
+        .await;
         self.republish_open_document_diagnostics().await;
     }
 
@@ -353,13 +359,16 @@ impl Backend {
 
     /// t9: rebuild the shard set from the current folder list. Reuses
     /// config+snapshot Arcs for roots whose (config-relevant) inputs are
-    /// unchanged so unrelated shards keep pointer identity.
+    /// unchanged so unrelated shards keep pointer identity. Source watchers
+    /// preserve last-good config when a file layer is unusable, while still
+    /// rebuilding snapshots from the updated sources.
     async fn reshard_from_folders(
         &self,
         root_path: Option<&std::path::Path>,
         init_options: Option<&serde_json::Value>,
         publish_diagnostics: bool,
         force_reload: bool,
+        preserve_last_good: bool,
     ) {
         let folder_paths = self.folder_paths.read().await.clone();
         let override_roots = self.init_options.read().await.as_ref().and_then(|o| {
@@ -412,6 +421,29 @@ impl Backend {
                 .iter()
                 .find(|w| w.root == *root)
                 .cloned();
+            // A source/archive watcher must not undo a rejected config edit.
+            // Explicit config reloads still apply valid sibling layers, even
+            // when another file in the ladder is unusable (B017).
+            let unusable_config = preserve_last_good
+                && [
+                    config_watch::user_config_path(),
+                    parent_config_base
+                        .map(|parent| parent.join(config_watch::WORKSPACE_CONFIG_FILE)),
+                    Some(root.join(config_watch::WORKSPACE_CONFIG_FILE)),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|path| {
+                    matches!(
+                        config_watch::config_reload_action(&path),
+                        ConfigReloadAction::KeepLastGood { .. }
+                    )
+                });
+            if unusable_config {
+                if let Some(prev) = &existing {
+                    config = prev.config.clone();
+                }
+            }
             if !force_reload {
                 if let Some(prev) = &existing {
                     if configs_equivalent(&prev.config, &config) {
@@ -1292,6 +1324,7 @@ impl LanguageServer for Backend {
             params.initialization_options.as_ref(),
             true,
             false,
+            false,
         )
         .await;
 
@@ -1552,8 +1585,14 @@ impl LanguageServer for Backend {
             // Dependency manifests, sources and archives also affect consumers
             // whose config did not change, including exports outside any root.
             // Reload all roots so their symbols and completeness fences agree.
-            self.reshard_from_folders(root_path.as_deref(), init_options.as_ref(), true, true)
-                .await;
+            self.reshard_from_folders(
+                root_path.as_deref(),
+                init_options.as_ref(),
+                true,
+                true,
+                true,
+            )
+            .await;
             self.republish_open_document_diagnostics().await;
             return;
         }
@@ -1570,6 +1609,9 @@ impl LanguageServer for Backend {
                     self.publish_manifest_diagnostics_for_root(&root).await;
                 }
             }
+        }
+        if !rebuilt.is_empty() {
+            self.republish_open_document_diagnostics().await;
         }
     }
 
@@ -1594,8 +1636,14 @@ impl LanguageServer for Backend {
         }
         let root_path = self.workspace_root.read().await.clone();
         let init_options = self.init_options.read().await.clone();
-        self.reshard_from_folders(root_path.as_deref(), init_options.as_ref(), true, false)
-            .await;
+        self.reshard_from_folders(
+            root_path.as_deref(),
+            init_options.as_ref(),
+            true,
+            false,
+            false,
+        )
+        .await;
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {

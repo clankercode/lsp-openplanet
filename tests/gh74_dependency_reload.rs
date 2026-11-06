@@ -65,6 +65,16 @@ struct Editor {
 
 impl Editor {
     async fn start(fixture: &Fixture, dependency_root: bool) -> Self {
+        Self::start_with_options(fixture, dependency_root, json!({"honor_gitignore": false})).await
+    }
+
+    async fn start_with_options(
+        fixture: &Fixture,
+        dependency_root: bool,
+        mut options: Value,
+    ) -> Self {
+        options["plugins_dir"] = json!(fixture.plugins);
+        options["unused"] = json!("ignore");
         let (service, socket) = LspService::new(Backend::new);
         let mut editor = Self {
             service,
@@ -82,11 +92,7 @@ impl Editor {
                     "capabilities": {},
                     "rootUri": file_uri(&fixture.consumer),
                     "workspaceFolders": roots,
-                    "initializationOptions": {
-                        "plugins_dir": fixture.plugins,
-                        "unused": "ignore",
-                        "honor_gitignore": false,
-                    }
+                    "initializationOptions": options,
                 }),
                 Some(1),
             )
@@ -126,11 +132,16 @@ impl Editor {
     }
 
     async fn open_main(&mut self, fixture: &Fixture) {
+        self.open_source(&fixture.consumer.join("src/Main.as"), MAIN)
+            .await;
+    }
+
+    async fn open_source(&mut self, path: &Path, text: &str) {
         self.send(
             "textDocument/didOpen",
             json!({"textDocument": {
-                "uri": file_uri(&fixture.consumer.join("src/Main.as")),
-                "languageId": "angelscript", "version": 1, "text": MAIN,
+                "uri": file_uri(path),
+                "languageId": "angelscript", "version": 1, "text": text,
             }}),
             None,
         )
@@ -464,4 +475,173 @@ fn dependency_define_matrix_labels_incomplete_checks_in_plain_and_json_output() 
         .as_str()
         .unwrap()
         .contains("cannot be verified"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dependency_watchers_keep_last_good_defines_and_gitignore_after_config_rejection() {
+    for archive in [false, true] {
+        for broken_config in [&b"defines = [\n"[..], &[0xff][..]] {
+            let fixture = Fixture::new("gh74-last-good-watcher");
+            let watched = if archive {
+                let path = fixture.plugins.join("Editor.op");
+                write_archive(&path, Some(EXPORT.as_bytes()));
+                fs::remove_dir_all(&fixture.dependency).unwrap();
+                path
+            } else {
+                let path = fixture.dependency.join("src/Missing.as");
+                fs::write(&path, EXPORT).unwrap();
+                path
+            };
+            let config = fixture.consumer.join(".openplanet-lsp.toml");
+            fs::write(
+                &config,
+                "defines = [\"KEEP_ME\"]\nhonor_gitignore = false\n",
+            )
+            .unwrap();
+            fs::create_dir_all(fixture.consumer.join("generated")).unwrap();
+            fs::write(
+                fixture.consumer.join("generated/Hidden.as"),
+                "void Hidden() {}\n",
+            )
+            .unwrap();
+            fs::write(fixture.consumer.join(".gitignore"), "generated/\n").unwrap();
+            let main = fixture.consumer.join("src/Main.as");
+            let source = "void Main() {\n#if KEEP_ME\n    Editor::Available();\n#else\n    Editor::WrongBranch();\n#endif\n}\n";
+            fs::write(&main, source).unwrap();
+            // File config owns both settings; initialize must not override them.
+            let mut editor = Editor::start_with_options(&fixture, false, json!({})).await;
+            assert_complete(editor.diagnostics(&fixture.consumer.join("info.toml")));
+
+            fs::write(&config, broken_config).unwrap();
+            editor.watched(&config, FileChangeType::CHANGED).await;
+            editor.open_source(&main, source).await;
+            assert_complete(editor.diagnostics(&fixture.consumer.join("info.toml")));
+            assert!(
+                editor
+                    .diagnostics(&main)
+                    .iter()
+                    .all(|d| d.severity != Some(DiagnosticSeverity::ERROR)),
+                "{:#?}",
+                editor.diagnostics(&main)
+            );
+
+            // The dependency really changes: Available must become an error in
+            // the KEEP_ME branch, while ignored files must remain included.
+            let updated = "namespace Editor { void Updated() {} }\n";
+            if archive {
+                write_archive(&watched, Some(updated.as_bytes()));
+            } else {
+                fs::write(&watched, updated).unwrap();
+            }
+            editor.watched(&watched, FileChangeType::CHANGED).await;
+            assert_complete(editor.diagnostics(&fixture.consumer.join("info.toml")));
+            let diagnostics = editor.diagnostics(&main);
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|d| d.severity == Some(DiagnosticSeverity::ERROR)
+                        && d.message.contains("Editor::Available")),
+                "{diagnostics:#?}"
+            );
+            assert!(
+                !diagnostics
+                    .iter()
+                    .any(|d| d.message.contains("Editor::WrongBranch")),
+                "{diagnostics:#?}"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn config_batch_applies_valid_child_layer_despite_broken_parent_layer() {
+    let fixture = Fixture::new("gh74-valid-config-layer");
+    fs::write(fixture.dependency.join("src/Missing.as"), EXPORT).unwrap();
+    let parent_config = fixture.consumer.join(".openplanet-lsp.toml");
+    let child_config = fixture.dependency.join(".openplanet-lsp.toml");
+    fs::write(&parent_config, "defines = [\"KEEP_ME\"]\n").unwrap();
+    fs::write(&child_config, "defines = [\"KEEP_ME\"]\n").unwrap();
+    let probe = fixture.dependency.join("src/Probe.as");
+    let source = "namespace Settings { void Ready() {} void Fresh() {} }\nvoid Probe() {\n#if NEW_DEFINE\n    Settings::Fresh();\n#else\n    Settings::Ready();\n#endif\n}\n";
+    fs::write(&probe, source).unwrap();
+    // With two roots, rootUri supplies the opened-folder parent config to
+    // the dependency root, so its ladder genuinely contains both files.
+    let mut editor = Editor::start(&fixture, true).await;
+    editor.open_source(&probe, source).await;
+    assert!(
+        editor
+            .diagnostics(&probe)
+            .iter()
+            .all(|d| d.severity != Some(DiagnosticSeverity::ERROR)),
+        "{:#?}",
+        editor.diagnostics(&probe)
+    );
+    assert!(editor.diagnostics(&probe).iter().any(|d|
+        matches!(d.code.as_ref(), Some(NumberOrString::String(code)) if code == "inactive-region")
+        && d.range.start.line == 3), "{:#?}", editor.diagnostics(&probe));
+
+    fs::write(&parent_config, "defines = [\n").unwrap();
+    fs::write(&child_config, "defines = [\"NEW_DEFINE\"]\n").unwrap();
+    editor
+        .send(
+            "workspace/didChangeWatchedFiles",
+            json!({"changes": [
+                {"uri": file_uri(&parent_config), "type": FileChangeType::CHANGED},
+                {"uri": file_uri(&child_config), "type": FileChangeType::CHANGED},
+            ]}),
+            None,
+        )
+        .await;
+    let diagnostics = editor.diagnostics(&probe);
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| d.severity != Some(DiagnosticSeverity::ERROR)),
+        "{diagnostics:#?}"
+    );
+    assert!(diagnostics.iter().any(|d|
+        matches!(d.code.as_ref(), Some(NumberOrString::String(code)) if code == "inactive-region")
+        && d.range.start.line == 5), "{diagnostics:#?}");
+    assert!(!diagnostics.iter().any(|d|
+        matches!(d.code.as_ref(), Some(NumberOrString::String(code)) if code == "inactive-region")
+        && d.range.start.line == 3), "{diagnostics:#?}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn gitignore_repair_and_rebreak_refresh_open_source_diagnostics() {
+    let fixture = Fixture::new("gh74-gitignore-republish");
+    fs::write(fixture.dependency.join("src/Missing.as"), EXPORT).unwrap();
+    fs::create_dir_all(fixture.consumer.join("generated")).unwrap();
+    fs::write(
+        fixture.consumer.join("generated/Hidden.as"),
+        "void Hidden() {}\n",
+    )
+    .unwrap();
+    let gitignore = fixture.consumer.join(".gitignore");
+    fs::write(&gitignore, "generated/\n").unwrap();
+    let mut editor =
+        Editor::start_with_options(&fixture, false, json!({"honor_gitignore": true})).await;
+    assert_incomplete(
+        editor.diagnostics(&fixture.consumer.join("info.toml")),
+        ".gitignore",
+    );
+    editor.open_main(&fixture).await;
+    assert!(editor
+        .diagnostics(&fixture.consumer.join("src/Main.as"))
+        .is_empty());
+
+    fs::write(&gitignore, "").unwrap();
+    editor.watched(&gitignore, FileChangeType::CHANGED).await;
+    assert_complete(editor.diagnostics(&fixture.consumer.join("info.toml")));
+    assert_resumed(editor.diagnostics(&fixture.consumer.join("src/Main.as")));
+
+    fs::write(&gitignore, "generated/\n").unwrap();
+    editor.watched(&gitignore, FileChangeType::CHANGED).await;
+    assert_incomplete(
+        editor.diagnostics(&fixture.consumer.join("info.toml")),
+        ".gitignore",
+    );
+    assert!(editor
+        .diagnostics(&fixture.consumer.join("src/Main.as"))
+        .is_empty());
 }

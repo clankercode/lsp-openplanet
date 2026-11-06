@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 use tower_lsp::lsp_types::*;
 use tower_lsp::{LanguageServer, LspService};
 
-use openplanet_lsp::analysis_snapshot::AnalysisSnapshot;
 use openplanet_lsp::server::Backend;
 
 fn temp_parent(name: &str) -> TempDir {
@@ -44,15 +43,20 @@ async fn watched(backend: &Backend, uri: &Url, typ: FileChangeType) {
         .await;
 }
 
-fn snapshot_of(
-    snaps: &[(PathBuf, std::sync::Arc<AnalysisSnapshot>)],
-    root: &Path,
-) -> std::sync::Arc<AnalysisSnapshot> {
-    snaps
-        .iter()
-        .find(|(r, _)| r == root)
-        .map(|(_, s)| s.clone())
-        .unwrap_or_else(|| panic!("workspace for {root:?} present"))
+async fn symbol_uris(backend: &Backend, name: &str) -> Vec<Url> {
+    backend
+        .symbol(WorkspaceSymbolParams {
+            query: name.into(),
+            partial_result_params: Default::default(),
+            work_done_progress_params: Default::default(),
+        })
+        .await
+        .unwrap()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|symbol| symbol.name == name)
+        .map(|symbol| symbol.location.uri)
+        .collect()
 }
 
 /// (a) info.toml Created on disk → re-walk adds the shard.
@@ -133,22 +137,28 @@ async fn lifecycle_manifest_deleted_drops_shard() {
     );
 }
 
-/// (c) info.toml Changed → owning shard reloads config (new manifest
-/// define) + snapshot; sibling untouched (ptr pin).
+/// (c) info.toml Changed → the new define refreshes A's symbols without
+/// changing the sibling's symbols or defines.
 #[tokio::test(flavor = "current_thread")]
-async fn lifecycle_manifest_changed_reloads_owning_shard_only() {
+async fn lifecycle_manifest_changed_refreshes_symbols_and_preserves_sibling_config() {
     let parent = temp_parent("changed");
-    let a_root = write_plugin(&parent, "plugin-a", "void AFunc() {}\n");
-    let b_root = write_plugin(&parent, "plugin-b", "void BFunc() {}\n");
+    let a_root = write_plugin(
+        &parent,
+        "plugin-a",
+        "void AFunc() {}\n#if DEPENDENCY_X\nvoid AEnabled() {}\n#endif\n",
+    );
+    let b_root = write_plugin(
+        &parent,
+        "plugin-b",
+        "void BFunc() {}\n#if DEPENDENCY_X\nvoid BLeaked() {}\n#endif\n",
+    );
 
     let (service, _socket) = LspService::new(Backend::new);
     let backend = service.inner();
     backend.initialize(init_params(&parent)).await.unwrap();
 
-    let (a_before, b_before) = {
-        let ws = backend.workspace_snapshots().await;
-        (snapshot_of(&ws, &a_root), snapshot_of(&ws, &b_root))
-    };
+    assert!(symbol_uris(backend, "AEnabled").await.is_empty());
+    assert!(symbol_uris(backend, "BLeaked").await.is_empty());
     assert!(
         !backend
             .workspace_configs()
@@ -178,23 +188,30 @@ async fn lifecycle_manifest_changed_reloads_owning_shard_only() {
         .expect("A shard");
     assert!(has_define, "changed manifest define must reload A's config");
 
-    let (a_after, b_after) = {
-        let ws = backend.workspace_snapshots().await;
-        (snapshot_of(&ws, &a_root), snapshot_of(&ws, &b_root))
-    };
     assert!(
-        !std::ptr::eq(&*a_before, &*a_after),
-        "A's snapshot must rebuild on manifest change"
+        !backend
+            .workspace_configs()
+            .await
+            .iter()
+            .find(|(r, _)| *r == b_root)
+            .map(|(_, c)| c.defines.contains("DEPENDENCY_X"))
+            .expect("B shard"),
+        "A's manifest define must not affect B's config"
     );
+    let a_uri = Url::from_file_path(a_root.join("main.as")).unwrap();
+    let b_uri = Url::from_file_path(b_root.join("main.as")).unwrap();
+    assert_eq!(symbol_uris(backend, "AEnabled").await, vec![a_uri.clone()]);
+    assert_eq!(symbol_uris(backend, "AFunc").await, vec![a_uri]);
+    assert_eq!(symbol_uris(backend, "BFunc").await, vec![b_uri]);
     assert!(
-        std::ptr::eq(&*b_before, &*b_after),
-        "B's snapshot must be untouched"
+        symbol_uris(backend, "BLeaked").await.is_empty(),
+        "A's define must not enable B's conditional symbols"
     );
 }
 
-/// (d) Non-manifest (.as) change under A rebuilds A only.
+/// (d) Non-manifest (.as) change refreshes A's symbols and preserves B's.
 #[tokio::test(flavor = "current_thread")]
-async fn lifecycle_as_change_rebuilds_owning_shard_only() {
+async fn lifecycle_as_change_refreshes_symbols_and_preserves_sibling_symbols() {
     let parent = temp_parent("aschange");
     let a_root = write_plugin(&parent, "plugin-a", "void AFunc() {}\n");
     let b_root = write_plugin(&parent, "plugin-b", "void BFunc() {}\n");
@@ -203,27 +220,19 @@ async fn lifecycle_as_change_rebuilds_owning_shard_only() {
     let backend = service.inner();
     backend.initialize(init_params(&parent)).await.unwrap();
 
-    let (a_before, b_before) = {
-        let ws = backend.workspace_snapshots().await;
-        (snapshot_of(&ws, &a_root), snapshot_of(&ws, &b_root))
-    };
+    let a_uri = Url::from_file_path(a_root.join("main.as")).unwrap();
+    let b_uri = Url::from_file_path(b_root.join("main.as")).unwrap();
+    assert_eq!(symbol_uris(backend, "AFunc").await, vec![a_uri.clone()]);
+    assert!(symbol_uris(backend, "UpdatedAFunc").await.is_empty());
+    assert_eq!(symbol_uris(backend, "BFunc").await, vec![b_uri.clone()]);
 
-    fs::write(a_root.join("main.as"), "void AFunc() { int x; }\n").unwrap();
+    fs::write(a_root.join("main.as"), "void UpdatedAFunc() {}\n").unwrap();
     let src_uri = Url::from_file_path(a_root.join("main.as")).unwrap();
     watched(&backend, &src_uri, FileChangeType::CHANGED).await;
 
-    let (a_after, b_after) = {
-        let ws = backend.workspace_snapshots().await;
-        (snapshot_of(&ws, &a_root), snapshot_of(&ws, &b_root))
-    };
-    assert!(
-        !std::ptr::eq(&*a_before, &*a_after),
-        "A's snapshot must rebuild on .as change"
-    );
-    assert!(
-        std::ptr::eq(&*b_before, &*b_after),
-        "B's snapshot must be untouched"
-    );
+    assert!(symbol_uris(backend, "AFunc").await.is_empty());
+    assert_eq!(symbol_uris(backend, "UpdatedAFunc").await, vec![a_uri]);
+    assert_eq!(symbol_uris(backend, "BFunc").await, vec![b_uri]);
 }
 
 /// (e) didChangeWorkspaceFolders: added folder with a plugin root grows
