@@ -47,7 +47,8 @@ OPTIONS:
 
 NOTES:
     The game DB filename follows the install variant: OpenplanetNext.json,
-    OpenplanetMP4.json, OpenplanetTurbo.json, or OpenplanetUnited.json —
+    Openplanet4.json (also OpenplanetMP4.json), OpenplanetTurbo.json,
+    or OpenplanetUnited.json —
     whichever the directory holds.
 
     Nothing in this command family accesses the network.
@@ -73,12 +74,11 @@ Run `openplanet-lsp typedb --help` for details.
 const CORE_DB_FILENAME: &str = "OpenplanetCore.json";
 
 /// Game-engine dump filenames a harvest may find in an install directory,
-/// most likely first. Mirrors [`LspConfig::game_json_filename_for_target`]
-/// but probes by presence instead of by target, so `--from` works for any
-/// variant without a `game_target` flag (per-variant DB selection is
-/// deliberately deferred — GH #59 idea I6).
+/// most likely first. A single variant retains the legacy filename-based
+/// behavior; a mixed harvest needs Core's build identity to disambiguate it.
 const GAME_DB_FILENAMES: &[&str] = &[
     "OpenplanetNext.json",
+    "Openplanet4.json",
     "OpenplanetMP4.json",
     "OpenplanetTurbo.json",
     "OpenplanetUnited.json",
@@ -101,17 +101,51 @@ impl DbPair {
         if !core.is_file() {
             return Err(format!("{CORE_DB_FILENAME} not found in {}", dir.display()));
         }
-        let game = GAME_DB_FILENAMES
+        // Resolve aliases as one variant so canonical + legacy MP4 filenames
+        // do not make an otherwise unambiguous harvest ambiguous.
+        let games: Vec<_> = ["TMNEXT", "MP4", "TURBO", "UNITED"]
             .iter()
-            .map(|name| dir.join(name))
-            .find(|path| path.is_file())
-            .ok_or_else(|| {
-                format!(
+            .map(|target| LspConfig::game_json_path_for_target(dir, target))
+            .filter(|path| path.is_file())
+            .collect();
+        let game = match games.as_slice() {
+            [] => {
+                return Err(format!(
                     "no game type database in {} (expected one of: {})",
                     dir.display(),
                     GAME_DB_FILENAMES.join(", ")
-                )
-            })?;
+                ))
+            }
+            [game] => game.clone(),
+            _ => {
+                let meta = TypeDbMeta::probe(&core)?;
+                let filename = meta
+                    .op
+                    .as_deref()
+                    .and_then(crate::typedb::catalog::stamped_game_filename)
+                    .ok_or_else(|| {
+                        format!(
+                            "ambiguous game type databases in {}: Core has no known variant stamp",
+                            dir.display()
+                        )
+                    })?;
+                games
+                    .into_iter()
+                    .find(|game| {
+                        game.file_name().is_some_and(|name| {
+                            name == filename
+                                || (filename == "Openplanet4.json" && name == "OpenplanetMP4.json")
+                        })
+                    })
+                    .ok_or_else(|| {
+                        format!(
+                            "{filename} not found in {} for Core build {:?}",
+                            dir.display(),
+                            meta.op
+                        )
+                    })?
+            }
+        };
         Ok(Self { core, game })
     }
 

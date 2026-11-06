@@ -6,7 +6,88 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::typedb::index::TypeDbMeta;
+use crate::config::LspConfig;
+use crate::typedb::index::{TypeDbMeta, TypeDbVersions};
+
+/// Build identities observed in the installed/recorded Core dumps. An old
+/// bare version stamp has no variant claim; its game filename is authoritative.
+pub(crate) fn stamped_game_filename(stamp: &str) -> Option<&'static str> {
+    let (_, meta) = OpVersion::parse_meta(stamp)?;
+    match meta?.split(',').next()?.trim() {
+        "next" => Some("OpenplanetNext.json"),
+        "v4" => Some("Openplanet4.json"),
+        "turbo" => Some("OpenplanetTurbo.json"),
+        _ => None,
+    }
+}
+
+fn validate_stamps(
+    core_path: &Path,
+    game_path: &Path,
+    core_op: Option<&str>,
+    game_op: Option<&str>,
+    target: &str,
+) -> Result<(), String> {
+    if let Some(stamp) = core_op {
+        if stamped_game_filename(stamp)
+            .is_some_and(|filename| filename != LspConfig::game_json_filename_for_target(target))
+        {
+            return Err(format!(
+                "{}: Core build {stamp:?} does not match game target {target}",
+                core_path.display()
+            ));
+        }
+    }
+    // Once either side makes a numeric version claim, both must confirm it.
+    // Neither side being numeric is the legacy non-versioned fixture case
+    // (including B064's core-stamp-A / 1.29.5-b064), not a schema error.
+    match (
+        core_op.and_then(OpVersion::parse),
+        game_op.and_then(OpVersion::parse),
+    ) {
+        (Some(core_version), Some(game_version)) if core_version != game_version => Err(format!(
+            "{}: Openplanet {core_version} does not match {}: Openplanet {game_version} (game target {target})",
+            core_path.display(), game_path.display()
+        )),
+        (Some(version), None) => Err(format!(
+            "{}: missing or unparseable `op` stamp {game_op:?}; cannot confirm Openplanet {version} from {} (game target {target})",
+            game_path.display(), core_path.display()
+        )),
+        (None, Some(version)) => Err(format!(
+            "{}: missing or unparseable `op` stamp {core_op:?}; cannot confirm Openplanet {version} from {} (game target {target})",
+            core_path.display(), game_path.display()
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Check a directory-selected pair before loading it for a game target.
+pub fn validate_pair_for_target(core: &Path, game: &Path, target: &str) -> Result<(), String> {
+    validate_stamps(
+        core,
+        game,
+        TypeDbMeta::probe(core)?.op.as_deref(),
+        TypeDbMeta::probe(game)?.op.as_deref(),
+        target,
+    )
+}
+
+/// Validate stamps from the index that actually loaded (B064), without a
+/// second read that could validate different bytes after a game update.
+pub fn validate_loaded_versions_for_target(
+    core: &Path,
+    game: &Path,
+    versions: &TypeDbVersions,
+    target: &str,
+) -> Result<(), String> {
+    validate_stamps(
+        core,
+        game,
+        versions.core_op.as_deref(),
+        versions.game_op.as_deref(),
+        target,
+    )
+}
 
 /// A parsed Openplanet version — the ordering key of every catalog entry.
 /// Derived `Ord` on field order gives numeric ordering (`1.29.5 < 1.29.14`,
@@ -86,6 +167,7 @@ pub struct CatalogEntry {
 #[derive(Debug, Clone, Default)]
 pub struct VersionCatalog {
     entries: Vec<CatalogEntry>,
+    target: String,
 }
 
 impl VersionCatalog {
@@ -98,6 +180,16 @@ impl VersionCatalog {
         installed: Option<(&Path, &Path)>,
         versions_root: Option<&Path>,
     ) -> Result<Self, String> {
+        Self::build_for_target(installed, versions_root, "TMNEXT")
+    }
+
+    /// A catalog is scoped to one game variant. Version numbers alone cannot
+    /// select MP4 versus Next; unrelated recorded variants never enter it.
+    pub fn build_for_target(
+        installed: Option<(&Path, &Path)>,
+        versions_root: Option<&Path>,
+        target: &str,
+    ) -> Result<Self, String> {
         let mut entries = Vec::new();
         if let Some((core, game)) = installed {
             entries.push(Self::entry_from_pair(
@@ -105,6 +197,7 @@ impl VersionCatalog {
                 game,
                 EntrySource::Installed,
                 None,
+                target,
             )?);
         }
         if let Some(root) = versions_root {
@@ -128,17 +221,40 @@ impl VersionCatalog {
                 if !path.is_dir() {
                     continue;
                 }
+                let core = path.join("OpenplanetCore.json");
+                let meta = TypeDbMeta::probe(&core)?;
+                let stamped_variant = meta.op.as_deref().and_then(stamped_game_filename);
+                if stamped_variant.is_some_and(|filename| {
+                    filename != LspConfig::game_json_filename_for_target(target)
+                }) {
+                    continue;
+                }
+                let game = LspConfig::game_json_path_for_target(&path, target);
+                // Bare Core stamps predate variant metadata. A dump for a
+                // different game is still not a candidate for this target.
+                if stamped_variant.is_none()
+                    && !game.is_file()
+                    && ["TMNEXT", "MP4", "TURBO", "UNITED"]
+                        .iter()
+                        .any(|other| LspConfig::game_json_path_for_target(&path, other).is_file())
+                {
+                    continue;
+                }
                 let entry = Self::entry_from_pair(
-                    &path.join("OpenplanetCore.json"),
-                    &path.join("OpenplanetNext.json"),
+                    &core,
+                    &game,
                     EntrySource::Recorded,
                     Some(dir_version),
+                    target,
                 )?;
                 entries.push(entry);
             }
         }
         entries.sort_by_key(|e| e.version);
-        Ok(Self { entries })
+        Ok(Self {
+            entries,
+            target: target.to_string(),
+        })
     }
 
     /// Probe one Core/game pair into an entry. `expect`: the version the
@@ -150,10 +266,18 @@ impl VersionCatalog {
         game_json: &Path,
         source: EntrySource,
         expect: Option<OpVersion>,
+        target: &str,
     ) -> Result<CatalogEntry, String> {
         let core = TypeDbMeta::probe(core_json)?;
         // Parse errors in the game dump surface now, not at load time.
-        let _game = TypeDbMeta::probe(game_json)?;
+        let game = TypeDbMeta::probe(game_json)?;
+        validate_stamps(
+            core_json,
+            game_json,
+            core.op.as_deref(),
+            game.op.as_deref(),
+            target,
+        )?;
         let stamp = core
             .op
             .ok_or_else(|| format!("{}: no `op` version stamp", core_json.display()))?;
@@ -212,7 +336,8 @@ impl VersionCatalog {
                 .max_by_key(|e| matches!(e.source, EntrySource::Installed));
             let Some(entry) = matched else {
                 return Err(format!(
-                    "unknown Openplanet version {version}; known versions: {}",
+                    "unknown Openplanet version {version} for game target {}; known versions: {}",
+                    self.target,
                     if self.entries.is_empty() {
                         "none (no installed typedb found and no --typedb-versions-dir given)"
                             .to_string()
@@ -357,25 +482,58 @@ pub fn resolve_single_pair(
     versions_root: Option<&Path>,
     requested: Option<&str>,
 ) -> (Option<(PathBuf, PathBuf)>, Option<String>) {
+    resolve_pair(installed, versions_root, requested, "TMNEXT", true)
+}
+
+/// Target-aware LSP entry point. An unavailable version/variant must not be
+/// replaced with a different snapshot. Initialization can continue without
+/// a database and log the returned resolution error.
+pub fn resolve_single_pair_for_target(
+    installed: Option<(&Path, &Path)>,
+    versions_root: Option<&Path>,
+    requested: Option<&str>,
+    target: &str,
+) -> (Option<(PathBuf, PathBuf)>, Option<String>) {
+    resolve_pair(installed, versions_root, requested, target, false)
+}
+
+fn resolve_pair(
+    installed: Option<(&Path, &Path)>,
+    versions_root: Option<&Path>,
+    requested: Option<&str>,
+    target: &str,
+    legacy_fallback: bool,
+) -> (Option<(PathBuf, PathBuf)>, Option<String>) {
     let installed_pair = || installed.map(|(c, g)| (c.to_path_buf(), g.to_path_buf()));
     if versions_root.is_none() && requested.is_none() {
+        if !legacy_fallback {
+            if let Some((core, game)) = installed {
+                if let Err(error) = validate_pair_for_target(core, game, target) {
+                    return (None, Some(error));
+                }
+            }
+        }
         return (installed_pair(), None);
     }
-    let resolved = VersionCatalog::build(installed, versions_root).and_then(|catalog| {
-        catalog.resolve_targets(requested).map(|targets| {
-            targets
-                .into_iter()
-                .map(|e| (e.label.clone(), e.core_json.clone(), e.game_json.clone()))
-                .collect::<Vec<_>>()
-        })
-    });
+    let resolved =
+        VersionCatalog::build_for_target(installed, versions_root, target).and_then(|catalog| {
+            catalog.resolve_targets(requested).map(|targets| {
+                targets
+                    .into_iter()
+                    .map(|e| (e.label.clone(), e.core_json.clone(), e.game_json.clone()))
+                    .collect::<Vec<_>>()
+            })
+        });
     match resolved {
-        Err(e) => (
+        Err(e) if legacy_fallback => (
             installed_pair(),
             Some(format!(
                 "openplanet_version/typedb_versions_dir ignored ({e}); using the installed type database"
             )),
         ),
+        Err(e) => (None, Some(format!(
+            "cannot resolve Openplanet version for game target {target}: {e}; no type database loaded"
+        ))),
         Ok(targets) => match targets.as_slice() {
             [] => (installed_pair(), None),
             [(_, core, game)] => (Some((core.clone(), game.clone())), None),
