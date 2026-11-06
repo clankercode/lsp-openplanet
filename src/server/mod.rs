@@ -1334,9 +1334,9 @@ impl LanguageServer for Backend {
 
         // Load type database. GH #18: `openplanet_version` /
         // `typedb_versions_dir` can redirect the pair to a recorded
-        // snapshot; any resolution problem logs and falls back to the
-        // installed pair — a server must not refuse to start over a
-        // config typo.
+        // snapshot for the selected game target. An unavailable or mismatched
+        // request logs a warning and leaves the database unloaded; the server
+        // still starts without silently substituting a different version.
         let config = self.config.read().await;
         let (resolved_pair, version_warning) =
             crate::typedb::catalog::resolve_single_pair_for_target(
