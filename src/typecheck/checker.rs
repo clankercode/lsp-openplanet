@@ -5776,8 +5776,9 @@ impl<'a> Checker<'a> {
     ///    file may contribute the member. The five conditions behind that
     ///    flag are enumerated on
     ///    `workspace::load::PluginWorkspaceLoad::dependency_closure_complete`.
-    /// 4. `Ns` must be declared as a namespace (a class is not one —
-    ///    AngelScript has no statics, so `MyClass::Thing()` stays silent).
+    /// 4. Known non-namespace qualifiers stay outside this rule (notably
+    ///    class-qualified calls); an absent namespace is an error when the
+    ///    complete module contains neither it nor the requested member.
     /// 5. Nothing of ANY kind may match under it — function, class,
     ///    interface, enum, enum value, funcdef, namespace or global
     ///    variable, plus `get_`/`set_` virtual-property accessors.
@@ -5800,7 +5801,12 @@ impl<'a> Checker<'a> {
         if !self.scope.workspace_closure_complete() {
             return None;
         }
-        if !self.scope.workspace_namespace_declared(ns) {
+        // A complete module can also prove that the namespace itself is
+        // absent (GH #70/#71). Keep known non-namespace qualifiers, notably
+        // classes, outside this free-function rule.
+        if !self.scope.workspace_namespace_declared(ns)
+            && (self.scope.has_type(ns) || self.scope.workspace_declares_any(ns))
+        {
             return None;
         }
         if self.workspace_ns_resolves(ns, member) {
@@ -5812,6 +5818,7 @@ impl<'a> Checker<'a> {
             let relative_ns = format!("{prefix}::{ns}");
             if self.scope.workspace_namespace_declared(&relative_ns)
                 || self.workspace_ns_resolves(&relative_ns, member)
+                || self.scope.has_type(&relative_ns)
             {
                 return None;
             }
@@ -11758,11 +11765,11 @@ void Main() {
         );
     }
 
-    /// A namespace absent from both the workspace and the typedb keeps the
-    /// GH #28 silence — there is nothing authoritative to check against.
+    /// An incomplete module cannot prove an absent namespace is undefined.
+    /// The complete-module case is covered through the CLI by GH #71.
     #[test]
     fn undeclared_namespace_stays_silent() {
-        let diags = check_closed_workspace("void Main() { NotDeclaredAnywhere::Foo(); }");
+        let diags = check("void Main() { NotDeclaredAnywhere::Foo(); }");
         assert!(
             no_matching_symbols(&diags).is_empty(),
             "undeclared namespaces must stay silent, got {:?}",
