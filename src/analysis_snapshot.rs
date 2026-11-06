@@ -52,6 +52,7 @@ pub struct AnalysisSnapshot {
     files: Vec<SnapshotFile>,
     symbols: SymbolTable,
     missing_required_dependencies: Vec<String>,
+    dependency_check_warnings: Vec<String>,
     /// Canonicalized paths of this plugin's own info.toml `[script]`
     /// exports + shared_exports files. Declarations inside them are
     /// public API — exempt from unused-declaration warnings. Empty for
@@ -129,12 +130,19 @@ impl AnalysisSnapshot {
         // guarded code is live against a module we do not have, so the
         // pooled table is NOT the complete compile surface and must not
         // claim authority.
-        let forced_absent_dependency = load
+        let forced_absent_dependencies: Vec<_> = load
             .unresolved_optional_dependencies
             .iter()
-            .filter_map(|dep| crate::config::dependency_define_name(dep))
-            .any(|name| config.defines.contains(&name));
-        if load.dependency_closure_complete && !forced_absent_dependency {
+            .filter_map(|dep| crate::config::dependency_define_name(dep).map(|name| (dep, name)))
+            .filter(|(_, name)| config.defines.contains(name))
+            .collect();
+        let mut dependency_check_warnings = load.dependency_check_warnings.clone();
+        for (dependency, define) in &forced_absent_dependencies {
+            dependency_check_warnings.push(format!(
+                "optional dependency `{dependency}` is not installed but `{define}` is defined; cross-plugin symbols cannot be verified"
+            ));
+        }
+        if load.dependency_closure_complete && forced_absent_dependencies.is_empty() {
             table.mark_dependency_closure_complete();
         }
         // Own-module view for diagnostics: identical pool except strict
@@ -162,6 +170,7 @@ impl AnalysisSnapshot {
             files,
             symbols: table,
             missing_required_dependencies: load.missing_required_dependencies.clone(),
+            dependency_check_warnings,
             export_paths: load.export_paths.clone(),
             strict_export_paths: load.strict_export_paths.clone(),
             own_module_symbols,
@@ -189,6 +198,7 @@ impl AnalysisSnapshot {
                 })
                 .collect(),
             missing_required_dependencies: Vec::new(),
+            dependency_check_warnings: Vec::new(),
             dependency_closure_complete: false,
             unresolved_optional_dependencies: Vec::new(),
             usage_only_sources: Vec::new(),
@@ -221,6 +231,7 @@ impl AnalysisSnapshot {
                 })
                 .collect(),
             missing_required_dependencies: Vec::new(),
+            dependency_check_warnings: Vec::new(),
             dependency_closure_complete: false,
             unresolved_optional_dependencies: Vec::new(),
             usage_only_sources: usage_only.to_vec(),
@@ -246,6 +257,7 @@ impl AnalysisSnapshot {
                 })
                 .collect(),
             missing_required_dependencies: Vec::new(),
+            dependency_check_warnings: Vec::new(),
             dependency_closure_complete: false,
             unresolved_optional_dependencies: Vec::new(),
             usage_only_sources: Vec::new(),
@@ -500,6 +512,11 @@ impl AnalysisSnapshot {
         &self.missing_required_dependencies
     }
 
+    /// Reasons the dependency surface was incomplete during this analysis.
+    pub fn dependency_check_warnings(&self) -> &[String] {
+        &self.dependency_check_warnings
+    }
+
     /// Canonicalized own-manifest export file paths (public API — see
     /// field docs). Populated by `from_load` from the workspace loader.
     pub fn export_paths(&self) -> &std::collections::HashSet<PathBuf> {
@@ -711,6 +728,7 @@ mod tests {
             root: dir.to_path_buf(),
             files: Vec::new(),
             missing_required_dependencies: Vec::new(),
+            dependency_check_warnings: Vec::new(),
             dependency_closure_complete: false,
             unresolved_optional_dependencies: Vec::new(),
             usage_only_sources: Vec::new(),
@@ -739,6 +757,7 @@ mod tests {
             root: real_dir,
             files: Vec::new(),
             missing_required_dependencies: Vec::new(),
+            dependency_check_warnings: Vec::new(),
             dependency_closure_complete: false,
             unresolved_optional_dependencies: Vec::new(),
             usage_only_sources: vec![(

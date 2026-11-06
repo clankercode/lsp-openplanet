@@ -324,13 +324,19 @@ impl Backend {
     pub async fn reload_config_from_disk(&self) {
         let root_path = self.workspace_root.read().await.clone();
         let init_options = self.init_options.read().await.clone();
-        self.reshard_from_folders(root_path.as_deref(), init_options.as_ref(), true, true)
-            .await;
+        self.reshard_from_folders(
+            root_path.as_deref(),
+            init_options.as_ref(),
+            true,
+            true,
+            false,
+        )
+        .await;
         self.republish_open_document_diagnostics().await;
     }
 
-    /// After a config reload, republish diagnostics for every open buffer
-    /// so squiggles match the new defines / discovery / target.
+    /// After reloading snapshots, republish diagnostics for every open buffer
+    /// so squiggles match the new sources / defines / discovery / target.
     async fn republish_open_document_diagnostics(&self) {
         let docs: Vec<(Url, String)> = self
             .documents
@@ -353,13 +359,16 @@ impl Backend {
 
     /// t9: rebuild the shard set from the current folder list. Reuses
     /// config+snapshot Arcs for roots whose (config-relevant) inputs are
-    /// unchanged so unrelated shards keep pointer identity.
+    /// unchanged so unrelated shards keep pointer identity. Source watchers
+    /// preserve last-good config when a file layer is unusable, while still
+    /// rebuilding snapshots from the updated sources.
     async fn reshard_from_folders(
         &self,
         root_path: Option<&std::path::Path>,
         init_options: Option<&serde_json::Value>,
         publish_diagnostics: bool,
         force_reload: bool,
+        preserve_last_good: bool,
     ) {
         let folder_paths = self.folder_paths.read().await.clone();
         let override_roots = self.init_options.read().await.as_ref().and_then(|o| {
@@ -412,6 +421,29 @@ impl Backend {
                 .iter()
                 .find(|w| w.root == *root)
                 .cloned();
+            // A source/archive watcher must not undo a rejected config edit.
+            // Explicit config reloads still apply valid sibling layers, even
+            // when another file in the ladder is unusable (B017).
+            let unusable_config = preserve_last_good
+                && [
+                    config_watch::user_config_path(),
+                    parent_config_base
+                        .map(|parent| parent.join(config_watch::WORKSPACE_CONFIG_FILE)),
+                    Some(root.join(config_watch::WORKSPACE_CONFIG_FILE)),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|path| {
+                    matches!(
+                        config_watch::config_reload_action(&path),
+                        ConfigReloadAction::KeepLastGood { .. }
+                    )
+                });
+            if unusable_config {
+                if let Some(prev) = &existing {
+                    config = prev.config.clone();
+                }
+            }
             if !force_reload {
                 if let Some(prev) = &existing {
                     if configs_equivalent(&prev.config, &config) {
@@ -432,6 +464,7 @@ impl Backend {
                         root: root.clone(),
                         files: open_into_files(open),
                         missing_required_dependencies: Vec::new(),
+                        dependency_check_warnings: vec![format!("workspace sources could not be loaded: {err}; cross-plugin symbols cannot be verified")],
                         dependency_closure_complete: false,
                         unresolved_optional_dependencies: Vec::new(),
                         usage_only_sources: Vec::new(),
@@ -514,13 +547,11 @@ impl Backend {
         let diagnostics = source
             .as_deref()
             .map(|source| {
-                diagnostics::compute_manifest_diagnostics_in_workspace(
-                    source,
-                    &workspace,
-                    snapshot.missing_required_dependencies(),
+                diagnostics::compute_manifest_diagnostics_for_snapshot(
+                    source, &workspace, &snapshot,
                 )
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|| diagnostics::workspace_dependency_diagnostics(&snapshot));
         self.client
             .publish_diagnostics(manifest_uri, diagnostics, None)
             .await;
@@ -690,6 +721,7 @@ impl Backend {
                     root: root.clone(),
                     files: open_into_files(open),
                     missing_required_dependencies: Vec::new(),
+                    dependency_check_warnings: vec![format!("workspace sources could not be loaded: {err}; cross-plugin symbols cannot be verified")],
                     dependency_closure_complete: false,
                     unresolved_optional_dependencies: Vec::new(),
                     usage_only_sources: Vec::new(),
@@ -778,6 +810,7 @@ impl Backend {
                             root: root.clone(),
                             files: open_into_files(open),
                             missing_required_dependencies: Vec::new(),
+                            dependency_check_warnings: vec![format!("workspace sources could not be loaded: {err}; cross-plugin symbols cannot be verified")],
                             dependency_closure_complete: false,
                             unresolved_optional_dependencies: Vec::new(),
                             usage_only_sources: Vec::new(),
@@ -794,6 +827,7 @@ impl Backend {
                 root: PathBuf::new(),
                 files: open_into_files(open),
                 missing_required_dependencies: Vec::new(),
+                dependency_check_warnings: Vec::new(),
                 dependency_closure_complete: false,
                 unresolved_optional_dependencies: Vec::new(),
                 usage_only_sources: Vec::new(),
@@ -902,11 +936,8 @@ impl Backend {
                 root,
                 plugin_files_search_paths: &search.plugin_files_search_paths,
             };
-            let diagnostics = diagnostics::compute_manifest_diagnostics_in_workspace(
-                text,
-                &workspace,
-                snapshot.missing_required_dependencies(),
-            );
+            let diagnostics =
+                diagnostics::compute_manifest_diagnostics_for_snapshot(text, &workspace, snapshot);
             self.client
                 .publish_diagnostics(uri.clone(), diagnostics, None)
                 .await;
@@ -999,17 +1030,11 @@ impl Backend {
             let diagnostics = manifest_source
                 .as_deref()
                 .map(|source| {
-                    diagnostics::compute_manifest_diagnostics_in_workspace(
-                        source,
-                        &workspace,
-                        snapshot.missing_required_dependencies(),
+                    diagnostics::compute_manifest_diagnostics_for_snapshot(
+                        source, &workspace, snapshot,
                     )
                 })
-                .unwrap_or_else(|| {
-                    diagnostics::missing_required_dependency_diagnostics(
-                        snapshot.missing_required_dependencies(),
-                    )
-                });
+                .unwrap_or_else(|| diagnostics::workspace_dependency_diagnostics(snapshot));
             self.client
                 .publish_diagnostics(publish_uri, diagnostics, None)
                 .await;
@@ -1105,9 +1130,7 @@ impl Backend {
             }
         }
         if uri.path().ends_with("info.toml") {
-            diags.extend(diagnostics::missing_required_dependency_diagnostics(
-                snapshot.missing_required_dependencies(),
-            ));
+            diags.extend(diagnostics::workspace_dependency_diagnostics(snapshot));
         }
 
         let manifest_diagnostics = if uri.path().ends_with("info.toml") {
@@ -1137,17 +1160,11 @@ impl Backend {
                 let diagnostics = manifest_source
                     .as_deref()
                     .map(|source| {
-                        diagnostics::compute_manifest_diagnostics_in_workspace(
-                            source,
-                            &workspace,
-                            snapshot.missing_required_dependencies(),
+                        diagnostics::compute_manifest_diagnostics_for_snapshot(
+                            source, &workspace, snapshot,
                         )
                     })
-                    .unwrap_or_else(|| {
-                        diagnostics::missing_required_dependency_diagnostics(
-                            snapshot.missing_required_dependencies(),
-                        )
-                    });
+                    .unwrap_or_else(|| diagnostics::workspace_dependency_diagnostics(snapshot));
                 (manifest_uri, diagnostics)
             })
         };
@@ -1306,6 +1323,7 @@ impl LanguageServer for Backend {
             root_path.as_deref(),
             params.initialization_options.as_ref(),
             true,
+            false,
             false,
         )
         .await;
@@ -1513,10 +1531,10 @@ impl LanguageServer for Backend {
         }
     }
 
-    /// t9: manifest/file watcher events. `**/info.toml` events re-shard
-    /// (roots appear/disappear); config-file events reload the config
-    /// ladder; other file events rebuild the owning shard (disk contents
-    /// changed under us).
+    /// Manifest events re-discover roots; source/archive events also reload
+    /// consumers, including dependencies outside the workspace folders.
+    /// Those reloads also republish open buffers. Config-file events reload
+    /// the config ladder; other file events rebuild the owning shard.
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
         let mut config_reload = false;
         let mut config_issues = Vec::new();
@@ -1556,13 +1574,26 @@ impl LanguageServer for Backend {
         }
         let needs_reshard = params.changes.iter().any(|event| {
             let path = event.uri.path();
-            path.ends_with("/info.toml") || path == "/info.toml"
+            path.ends_with("/info.toml")
+                || path == "/info.toml"
+                || path.ends_with(".as")
+                || path.ends_with(".op")
         });
         if needs_reshard {
             let root_path = self.workspace_root.read().await.clone();
             let init_options = self.init_options.read().await.clone();
-            self.reshard_from_folders(root_path.as_deref(), init_options.as_ref(), true, false)
-                .await;
+            // Dependency manifests, sources and archives also affect consumers
+            // whose config did not change, including exports outside any root.
+            // Reload all roots so their symbols and completeness fences agree.
+            self.reshard_from_folders(
+                root_path.as_deref(),
+                init_options.as_ref(),
+                true,
+                true,
+                true,
+            )
+            .await;
+            self.republish_open_document_diagnostics().await;
             return;
         }
         // Non-manifest events: rebuild the owning workspace of each changed
@@ -1578,6 +1609,9 @@ impl LanguageServer for Backend {
                     self.publish_manifest_diagnostics_for_root(&root).await;
                 }
             }
+        }
+        if !rebuilt.is_empty() {
+            self.republish_open_document_diagnostics().await;
         }
     }
 
@@ -1602,8 +1636,14 @@ impl LanguageServer for Backend {
         }
         let root_path = self.workspace_root.read().await.clone();
         let init_options = self.init_options.read().await.clone();
-        self.reshard_from_folders(root_path.as_deref(), init_options.as_ref(), true, false)
-            .await;
+        self.reshard_from_folders(
+            root_path.as_deref(),
+            init_options.as_ref(),
+            true,
+            false,
+            false,
+        )
+        .await;
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
@@ -4337,14 +4377,20 @@ mod tests {
         )
         .await;
 
-        // Nothing from the archive's manifest leaked into the consumer's,
-        // and the archive's own path was never a publish target.
+        // The consumer must know its dependency could not be checked, but
+        // archive-owned rules (such as missing version) do not belong here.
         assert_eq!(
-            published.diagnostics,
-            Vec::<Diagnostic>::new(),
+            published.diagnostics.len(),
+            1,
             "{:?}",
             published.diagnostics
         );
+        let warning = &published.diagnostics[0];
+        assert_eq!(warning.severity, Some(DiagnosticSeverity::WARNING));
+        assert!(warning.message.contains("ArchivedDep"));
+        assert!(warning.message.contains("Gone.as"));
+        assert!(warning.message.contains("cannot be verified"));
+        assert!(!warning.message.contains("[meta].version"));
         assert!(
             !published.uri.path().contains(".op"),
             "published against {}",
