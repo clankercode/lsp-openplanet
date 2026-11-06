@@ -29,6 +29,9 @@ pub struct PluginWorkspaceLoad {
     pub files: Vec<WorkspaceSourceFile>,
     /// Required dependencies that could not be resolved in any plugins dir.
     pub missing_required_dependencies: Vec<String>,
+    /// Reasons cross-plugin symbol validation could not inspect a complete
+    /// dependency surface. Published on the consumer's manifest.
+    pub dependency_check_warnings: Vec<String>,
     /// True when the pooled sources are the plugin's COMPLETE compile
     /// surface. Diagnostics that read the absence of a name as a
     /// game-compiler rejection must gate on this (GH #58): AngelScript
@@ -326,10 +329,27 @@ fn load_plugin_workspace_with_source_reader(
     // `PluginWorkspaceLoad::dependency_closure_complete`, in the same order.
     // Reaching this line at all satisfies (1): a real root was walked.
     let dependency_closure_complete = dep.unresolved.is_empty() // (2)
-        && dep.incomplete_export_surfaces.is_empty() // (3)
+        && dep.incomplete_dependency_reasons.is_empty() // (3)
         && search.source_paths.is_none() // (4)
         && search.ignore_paths.is_none() // (4)
         && gitignore_excluded_files.is_empty(); // (5)
+    let mut dependency_check_warnings = dep.incomplete_dependency_reasons;
+    for (setting, configured) in [
+        ("source_paths", search.source_paths.is_some()),
+        ("ignore_paths", search.ignore_paths.is_some()),
+    ] {
+        if configured {
+            dependency_check_warnings.push(format!(
+                "`{setting}` is configured; cross-plugin symbols cannot be verified"
+            ));
+        }
+    }
+    if !gitignore_excluded_files.is_empty() {
+        dependency_check_warnings.push(format!(
+            "{} .as source file(s) excluded by .gitignore; cross-plugin symbols cannot be verified",
+            gitignore_excluded_files.len()
+        ));
+    }
     for (path, source) in dep.loaded_files {
         // Avoid double-including if a dep export somehow lives under root.
         if files.iter().any(|f| f.path == path) {
@@ -346,6 +366,7 @@ fn load_plugin_workspace_with_source_reader(
         root,
         files,
         missing_required_dependencies: dep.missing_required,
+        dependency_check_warnings,
         dependency_closure_complete,
         unresolved_optional_dependencies: dep.unresolved_optional,
         usage_only_sources,
@@ -453,6 +474,7 @@ pub fn merge_open_documents(
         root: base.root.clone(),
         files,
         missing_required_dependencies: base.missing_required_dependencies.clone(),
+        dependency_check_warnings: base.dependency_check_warnings.clone(),
         dependency_closure_complete: base.dependency_closure_complete,
         unresolved_optional_dependencies: base.unresolved_optional_dependencies.clone(),
         usage_only_sources,
@@ -492,7 +514,7 @@ struct DepLoad {
     /// Resolved dependencies with manifest-declared exports that were missing
     /// or unreadable. Preserve the exact export names as evidence that their
     /// namespace surface is incomplete.
-    incomplete_export_surfaces: Vec<(String, Vec<String>)>,
+    incomplete_dependency_reasons: Vec<String>,
 }
 
 fn plugin_identity(manifest: &Manifest, fallback: &str) -> Option<String> {
@@ -572,9 +594,16 @@ fn load_dependency_exports(
                     continue;
                 }
                 if !resolved.unloaded_exports.is_empty() {
-                    result
-                        .incomplete_export_surfaces
-                        .push((dep_id.clone(), resolved.unloaded_exports.clone()));
+                    let mut seen_exports = HashSet::new();
+                    for export in &resolved.unloaded_exports {
+                        if !seen_exports.insert(export) {
+                            continue;
+                        }
+                        result.incomplete_dependency_reasons.push(format!(
+                            "dependency `{dep_id}` ({}) declares export `{export}` which could not be read; cross-plugin symbols cannot be verified",
+                            resolved.root.display()
+                        ));
+                    }
                 }
                 push_export_sources(&resolved.export_files, &mut result, &mut seen_files)?;
                 // Recurse into the dep's own export_dependencies so nested
@@ -608,6 +637,9 @@ fn load_dependency_exports(
                     tracing::warn!(
                         "dependency `{dep_id}` (export_dependency of `{parent}`) not found in any plugins dir"
                     );
+                    result.incomplete_dependency_reasons.push(format!(
+                        "dependency `{dep_id}` (export_dependency of `{parent}`) not found in any configured plugin directory; cross-plugin symbols cannot be verified"
+                    ));
                 }
             }
         }

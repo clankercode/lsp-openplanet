@@ -65,9 +65,49 @@ pub fn missing_required_dependency_diagnostics(dependencies: &[String]) -> Vec<D
         .collect()
 }
 
-/// Every diagnostic that belongs on an info.toml: the manifest rules plus
-/// unresolved required plugin dependencies. Kept together so replacing the
-/// published set never drops one kind while refreshing the other.
+/// Surface incomplete checks even when no specific missing symbol is provable.
+pub fn dependency_check_warning_diagnostics(reasons: &[String]) -> Vec<Diagnostic> {
+    reasons
+        .iter()
+        .map(|message| Diagnostic {
+            range: Range::default(),
+            severity: Some(DiagnosticSeverity::WARNING),
+            code: Some(tower_lsp::lsp_types::NumberOrString::String(
+                "dependency-check-incomplete".into(),
+            )),
+            message: message.clone(),
+            source: Some("openplanet-lsp".to_string()),
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// Dependency diagnostics for a workspace, including checks that were skipped.
+pub fn workspace_dependency_diagnostics(
+    snapshot: &crate::analysis_snapshot::AnalysisSnapshot,
+) -> Vec<Diagnostic> {
+    let mut diagnostics =
+        missing_required_dependency_diagnostics(snapshot.missing_required_dependencies());
+    diagnostics.extend(dependency_check_warning_diagnostics(
+        snapshot.dependency_check_warnings(),
+    ));
+    diagnostics
+}
+
+/// The complete manifest diagnostic set for the current analysis snapshot.
+pub fn compute_manifest_diagnostics_for_snapshot(
+    source: &str,
+    workspace: &ManifestWorkspace<'_>,
+    snapshot: &crate::analysis_snapshot::AnalysisSnapshot,
+) -> Vec<Diagnostic> {
+    let mut diagnostics = manifest_rule_diagnostics(source, Some(workspace));
+    diagnostics.extend(workspace_dependency_diagnostics(snapshot));
+    diagnostics
+}
+
+/// Manifest rules plus unresolved required plugin dependencies. Call
+/// [`compute_manifest_diagnostics_for_snapshot`] when a snapshot is available
+/// to include explanations for incomplete dependency checks.
 ///
 /// Takes the workspace root explicitly. The URI a client opened may be a
 /// symlink alias (dips++-all layout), so it is publication identity only —

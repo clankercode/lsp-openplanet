@@ -1010,6 +1010,17 @@ fn collect_pass_diagnostics(
         }
     }
 
+    for diagnostic in
+        diagnostics::dependency_check_warning_diagnostics(snapshot.dependency_check_warnings())
+    {
+        cli_diagnostics.push(CliDiagnostic {
+            path: manifest_path.to_path_buf(),
+            combos: Vec::new(),
+            versions: Vec::new(),
+            diagnostic,
+        });
+    }
+
     // B040: info.toml rules (missing `version`, `exports` pointing at files
     // that are not there, deprecated keys) reach `check` through the same
     // seam the LSP publishes from — the manifest decides whether the plugin
