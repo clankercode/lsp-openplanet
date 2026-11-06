@@ -155,46 +155,100 @@ fn gh75_consumer_globals_conflict_with_non_reporting_dependency_exports() {
 #[test]
 fn gh75_strict_exports_respect_root_and_transitive_dependency_reexports() {
     let mut actual = Vec::new();
-    for (case, declarations, expected) in [
-        ("direct", "export_dependencies = [\"Dep\"]", 1),
+    for (case, declarations, bridge_target, archive, expected) in [
+        ("direct", "export_dependencies = [\"Dep\"]", "Dep", false, 1),
         (
             "direct_already_private",
             "dependencies = [\"Dep\"]\nexport_dependencies = [\"Dep\"]",
+            "Dep",
+            false,
             1,
         ),
         (
             "transitive_already_private",
             "dependencies = [\"Dep\"]\nexport_dependencies = [\"Bridge\"]",
+            "Dep",
+            false,
             1,
         ),
-        ("private_only", "dependencies = [\"Dep\"]", 0),
+        ("private_only", "dependencies = [\"Dep\"]", "Dep", false, 0),
+        // Dep's folder ID is loaded privately first. The module ID then
+        // resolves the same identity via a different dependency spelling.
+        (
+            "alias_already_private",
+            "dependencies = [\"Dep\"]\nexport_dependencies = [\"DepAlias\"]",
+            "Dep",
+            false,
+            1,
+        ),
+        (
+            "transitive_alias_already_private",
+            "dependencies = [\"Dep\"]\nexport_dependencies = [\"Bridge\"]",
+            "DepAlias",
+            false,
+            1,
+        ),
+        // Archives contribute pseudo paths, which cannot canonicalize on disk.
+        (
+            "archive_direct",
+            "export_dependencies = [\"Dep\"]",
+            "Dep",
+            true,
+            1,
+        ),
+        (
+            "archive_already_private",
+            "dependencies = [\"Dep\"]\nexport_dependencies = [\"Dep\"]",
+            "Dep",
+            true,
+            1,
+        ),
+        (
+            "archive_transitive_already_private",
+            "dependencies = [\"Dep\"]\nexport_dependencies = [\"Bridge\"]",
+            "Dep",
+            true,
+            1,
+        ),
+        (
+            "archive_private_only",
+            "dependencies = [\"Dep\"]",
+            "Dep",
+            true,
+            0,
+        ),
     ] {
         let root = plugin();
-        let dependency = root.join("plugins/Dep");
-        let bridge = root.join("plugins/Bridge");
-        fs::create_dir_all(&dependency).unwrap();
-        fs::create_dir_all(&bridge).unwrap();
-        fs::write(
-            root.join("info.toml"),
-            format!(
-                "[meta]\nname = \"Provider\"\nversion = \"0.1.0\"\n[script]\nexports = [\"Api.as\"]\n{declarations}\n"
-            ),
-        )
-        .unwrap();
-        fs::write(root.join("Main.as"), "void Main() {}").unwrap();
-        fs::write(root.join("Api.as"), "namespace N { int x; }").unwrap();
-        fs::write(
-            dependency.join("info.toml"),
-            "[meta]\nname = \"Dep\"\nversion = \"0.1.0\"\n[script]\nexports = [\"Api.as\"]\n",
-        )
-        .unwrap();
-        fs::write(dependency.join("Api.as"), "namespace N { int x; }").unwrap();
-        fs::write(
-            bridge.join("info.toml"),
-            "[meta]\nname = \"Bridge\"\nversion = \"0.1.0\"\n[script]\nexport_dependencies = [\"Dep\"]\n",
-        )
-        .unwrap();
         let plugins = root.join("plugins");
+        fs::create_dir_all(&plugins).unwrap();
+        fs::write(root.join("info.toml"), format!("[meta]\nname = \"Provider\"\nversion = \"0.1.0\"\n[script]\nexports = [\"Api.as\"]\n{declarations}\n")).unwrap();
+        fs::write(
+            root.join("Main.as"),
+            "void Main() { DependencyAvailable(); }",
+        )
+        .unwrap();
+        fs::write(root.join("Api.as"), "namespace N { int x; }").unwrap();
+        for (name, manifest, source) in [
+            ("Dep", "[meta]\nname = \"Dep\"\nversion = \"0.1.0\"\n[script]\nmodule = \"DepAlias\"\nexports = [\"Api.as\"]\n".to_string(), "namespace N { int x; } void DependencyAvailable() {}"),
+            ("Bridge", format!("[meta]\nname = \"Bridge\"\nversion = \"0.1.0\"\n[script]\nexport_dependencies = [\"{bridge_target}\"]\n"), ""),
+        ] {
+            if archive {
+                use std::io::Write;
+                let file = fs::File::create(plugins.join(format!("{name}.op"))).unwrap();
+                let mut zip = zip::ZipWriter::new(file);
+                let options = zip::write::SimpleFileOptions::default();
+                zip.start_file("info.toml", options).unwrap();
+                zip.write_all(manifest.as_bytes()).unwrap();
+                zip.start_file("Api.as", options).unwrap();
+                zip.write_all(source.as_bytes()).unwrap();
+                zip.finish().unwrap();
+            } else {
+                let dependency = plugins.join(name);
+                fs::create_dir_all(&dependency).unwrap();
+                fs::write(dependency.join("info.toml"), manifest).unwrap();
+                fs::write(dependency.join("Api.as"), source).unwrap();
+            }
+        }
         let (status, errors) = check(&root, &["--plugins-dir", plugins.to_str().unwrap()]);
         assert!(
             errors
