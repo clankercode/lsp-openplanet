@@ -151,3 +151,67 @@ fn gh75_consumer_globals_conflict_with_non_reporting_dependency_exports() {
         assert_eq!(errors[0]["message"], "'x' is already declared");
     }
 }
+
+#[test]
+fn gh75_strict_exports_respect_root_and_transitive_dependency_reexports() {
+    let mut actual = Vec::new();
+    for (case, declarations, expected) in [
+        ("direct", "export_dependencies = [\"Dep\"]", 1),
+        (
+            "direct_already_private",
+            "dependencies = [\"Dep\"]\nexport_dependencies = [\"Dep\"]",
+            1,
+        ),
+        (
+            "transitive_already_private",
+            "dependencies = [\"Dep\"]\nexport_dependencies = [\"Bridge\"]",
+            1,
+        ),
+        ("private_only", "dependencies = [\"Dep\"]", 0),
+    ] {
+        let root = plugin();
+        let dependency = root.join("plugins/Dep");
+        let bridge = root.join("plugins/Bridge");
+        fs::create_dir_all(&dependency).unwrap();
+        fs::create_dir_all(&bridge).unwrap();
+        fs::write(
+            root.join("info.toml"),
+            format!(
+                "[meta]\nname = \"Provider\"\nversion = \"0.1.0\"\n[script]\nexports = [\"Api.as\"]\n{declarations}\n"
+            ),
+        )
+        .unwrap();
+        fs::write(root.join("Main.as"), "void Main() {}").unwrap();
+        fs::write(root.join("Api.as"), "namespace N { int x; }").unwrap();
+        fs::write(
+            dependency.join("info.toml"),
+            "[meta]\nname = \"Dep\"\nversion = \"0.1.0\"\n[script]\nexports = [\"Api.as\"]\n",
+        )
+        .unwrap();
+        fs::write(dependency.join("Api.as"), "namespace N { int x; }").unwrap();
+        fs::write(
+            bridge.join("info.toml"),
+            "[meta]\nname = \"Bridge\"\nversion = \"0.1.0\"\n[script]\nexport_dependencies = [\"Dep\"]\n",
+        )
+        .unwrap();
+        let plugins = root.join("plugins");
+        let (status, errors) = check(&root, &["--plugins-dir", plugins.to_str().unwrap()]);
+        assert!(
+            errors
+                .iter()
+                .all(|d| d["path"] == "Api.as" && d["message"] == "'x' is already declared"),
+            "{case}: {errors:?}"
+        );
+        actual.push((case, status, errors.len(), expected));
+    }
+    let failures: Vec<_> = actual
+        .iter()
+        .filter(|(_, status, count, expected)| {
+            count != expected || *status != i32::from(*expected > 0)
+        })
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "root/transitive/private reachability: {actual:?}"
+    );
+}
