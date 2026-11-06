@@ -20,6 +20,7 @@ use super::resolver::TypeResolver;
 use crate::lexer::token::TokenKind;
 use crate::lexer::Span;
 use crate::parser::ast::*;
+use crate::symbols::scope::SymbolKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypeDiagnosticSeverity {
@@ -762,6 +763,8 @@ pub struct Checker<'a> {
     /// top-level (free) function declarations in this file. Used by GH #37
     /// slice 3 to flag `DuplicateFunction` at the second and later decl.
     seen_function_sigs: std::collections::HashSet<(String, String)>,
+    /// Namespace-qualified global declarators already visited in this file.
+    seen_global_variables: std::collections::HashSet<String>,
     file_id: Option<usize>,
     /// Scoped suppression for the `+`-mix arm of SignedUnsignedMismatch
     /// (GH #37): while walking the operands of a NON-relational arithmetic
@@ -810,6 +813,7 @@ impl<'a> Checker<'a> {
             span_expr_types: std::collections::HashMap::new(),
             record_types: false,
             seen_function_sigs: std::collections::HashSet::new(),
+            seen_global_variables: std::collections::HashSet::new(),
             file_id: None,
             arith_suppress_add_mix: 0,
             used_names: None,
@@ -1625,6 +1629,7 @@ impl<'a> Checker<'a> {
         }
 
         let mut members: Vec<(String, TypeRepr)> = Vec::new();
+        let mut field_names = std::collections::HashSet::new();
         for member in &cls.members {
             match member {
                 ClassMember::Field(var) => {
@@ -1642,7 +1647,15 @@ impl<'a> Checker<'a> {
                         repr
                     };
                     for d in &var.declarators {
-                        members.push((d.name.text(self.source).to_string(), ty.clone()));
+                        let name = d.name.text(self.source).to_string();
+                        if !field_names.insert(name.clone()) {
+                            self.diagnostics.push(TypeDiagnostic {
+                                span: d.name.span,
+                                kind: TypeDiagnosticKind::AlreadyDeclared { name },
+                            });
+                        } else {
+                            members.push((name, ty.clone()));
+                        }
                     }
                 }
                 ClassMember::Property(prop) => {
@@ -2085,6 +2098,24 @@ impl<'a> Checker<'a> {
         // itself is never referenced (unused-decl analysis).
         self.record_type_repr_uses(&ty);
         for d in &var.declarators {
+            let name = d.name.text(self.source).to_string();
+            let qualified = match self.current_namespace_qualified() {
+                Some(ns) => format!("{ns}::{name}"),
+                None => name.clone(),
+            };
+            let seen_here = !self.seen_global_variables.insert(qualified.clone());
+            let seen_in_prior_file =
+                self.file_id.is_some_and(|file_id| {
+                    self.scope.workspace().lookup(&qualified).iter().any(|s| {
+                        s.file_id < file_id && matches!(s.kind, SymbolKind::Variable { .. })
+                    })
+                });
+            if seen_here || seen_in_prior_file {
+                self.diagnostics.push(TypeDiagnostic {
+                    span: d.name.span,
+                    kind: TypeDiagnosticKind::AlreadyDeclared { name },
+                });
+            }
             if let Some(init) = &d.init {
                 let init_ty = self.expr_type(init);
                 self.check_funcdef_binding(&ty, init, &init_ty);
