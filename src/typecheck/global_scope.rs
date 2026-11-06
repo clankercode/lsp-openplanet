@@ -2530,6 +2530,47 @@ impl<'a> GlobalScope<'a> {
         None
     }
 
+    /// Whether a workspace value denotes accessor sugar. `None` means
+    /// neither the value nor its accessors are declared in this scope.
+    pub fn workspace_value_is_virtual_property(&self, qualified: &str) -> Option<bool> {
+        let exact = self.lookup_workspace(qualified);
+        if !exact.is_empty() {
+            return Some(exact.iter().any(|s| s.modifiers.is_virtual_property));
+        }
+        ["get_", "set_"].iter().find_map(|prefix| {
+            self.lookup_workspace(&qualified_virtual_name(qualified, prefix))
+                .iter()
+                .any(|s| matches!(s.kind, SymbolKind::Function { .. }))
+                .then_some(true)
+        })
+    }
+
+    /// Resolve fields and accessors together, nearest owner first, so an
+    /// own field hides an inherited virtual property and vice versa.
+    pub fn workspace_member_is_virtual_property(
+        &self,
+        class_name: &str,
+        member: &str,
+    ) -> Option<bool> {
+        let mut seen = std::collections::HashSet::new();
+        let mut queue =
+            std::collections::VecDeque::from([self.normalize_workspace_class_name(class_name)]);
+        while let Some(owner) = queue.pop_front() {
+            if !seen.insert(owner.clone()) {
+                continue;
+            }
+            if let Some(property) =
+                self.workspace_value_is_virtual_property(&format!("{owner}::{member}"))
+            {
+                return Some(property);
+            }
+            for parent in self.workspace_class_parents(&owner) {
+                queue.push_back(self.normalize_workspace_class_name_in_context(&parent, &owner));
+            }
+        }
+        None
+    }
+
     fn normalize_workspace_class_name(&self, name: &str) -> String {
         self.normalize_workspace_class_name_in_context(name, name)
     }

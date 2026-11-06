@@ -257,6 +257,9 @@ pub enum TypeDiagnosticKind {
     AlreadyDeclared {
         name: String,
     },
+    /// GH #73: script accessor values cannot supply the reference needed
+    /// by an increment/decrement or compound assignment.
+    PropertyCombinedReadWrite,
     /// Game parity (GH #37): statement(s) after a terminating statement
     /// (return/break/continue, or an if-else where both branches terminate)
     /// inside the same block. The game warns `Unreachable code` once per
@@ -503,6 +506,9 @@ impl TypeDiagnostic {
             ),
             TypeDiagnosticKind::AlreadyDeclared { name } => {
                 format!("'{name}' is already declared")
+            }
+            TypeDiagnosticKind::PropertyCombinedReadWrite => {
+                "Invalid reference. Property accessors cannot be used in combined read/write operations".to_string()
             }
             TypeDiagnosticKind::UnreachableCode => "Unreachable code".to_string(),
             TypeDiagnosticKind::NoImplicitConversion { from, to } => {
@@ -5953,6 +5959,63 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Classify the actual target, not values reached through it: `P[i]++`
+    /// writes an element, whereas `P++` requires a reference to the accessor.
+    fn check_combined_property_operation(&mut self, target: &Expr) {
+        let property = match &target.kind {
+            ExprKind::Ident(ident) => {
+                let name = ident.text(self.source);
+                if self.lookup_local(name).is_some() {
+                    return;
+                }
+                let member = self.current_class().and_then(|class| {
+                    self.scope
+                        .workspace_member_is_virtual_property(&class.name, name)
+                });
+                member.or_else(|| self.global_value_is_virtual_property(name))
+            }
+            ExprKind::NamespaceAccess { path } => {
+                let name = path.to_string(self.source);
+                if path.span.text(self.source).starts_with("::") {
+                    self.scope.workspace_value_is_virtual_property(&name)
+                } else {
+                    self.global_value_is_virtual_property(&name)
+                }
+            }
+            ExprKind::Member { object, member } => {
+                // The ordinary expression walk already retained receiver
+                // diagnostics. Reuse its type without emitting them twice.
+                let mark = self.diagnostics.len();
+                let ty = self.expr_type(object);
+                self.diagnostics.truncate(mark);
+                Self::base_type_name(&ty).and_then(|class| {
+                    self.scope
+                        .workspace_member_is_virtual_property(&class, member.text(self.source))
+                })
+            }
+            _ => None,
+        };
+        if property == Some(true) {
+            self.diagnostics.push(TypeDiagnostic {
+                span: target.span,
+                kind: TypeDiagnosticKind::PropertyCombinedReadWrite,
+            });
+        }
+    }
+
+    fn global_value_is_virtual_property(&self, name: &str) -> Option<bool> {
+        for depth in (1..=self.namespace_stack.len()).rev() {
+            let ns = self.namespace_stack[..depth].join("::");
+            if let Some(property) = self
+                .scope
+                .workspace_value_is_virtual_property(&format!("{ns}::{name}"))
+            {
+                return Some(property);
+            }
+        }
+        self.scope.workspace_value_is_virtual_property(name)
+    }
+
     fn expr_type_inner(&mut self, expr: &Expr) -> TypeRepr {
         match &expr.kind {
             ExprKind::IntLit(_) | ExprKind::HexLit(_) => TypeRepr::Primitive(PrimitiveType::Int),
@@ -6174,6 +6237,9 @@ impl<'a> Checker<'a> {
             }
             ExprKind::Unary { op, expr } => {
                 let operand_ty = self.expr_type(expr);
+                if matches!(op, UnaryOp::Inc | UnaryOp::Dec) {
+                    self.check_combined_property_operation(expr);
+                }
                 // AngelScript: `!` is bool-only. Game rejects non-bool
                 // operands with "Illegal operation on this datatype"
                 // (OP 1.29.5; tm-control-mcp AsyncDispatch.as:136).
@@ -6221,7 +6287,11 @@ impl<'a> Checker<'a> {
                 }
                 operand_ty
             }
-            ExprKind::Postfix { expr, .. } => self.expr_type(expr),
+            ExprKind::Postfix { expr, .. } => {
+                let ty = self.expr_type(expr);
+                self.check_combined_property_operation(expr);
+                ty
+            }
             ExprKind::Call { callee, args } => {
                 // `call_type` is responsible for walking each `args` entry
                 // exactly once via `expr_type`. Do NOT pre-walk here — the
@@ -6355,6 +6425,9 @@ impl<'a> Checker<'a> {
                 // `loc.tx += …`): the game rejects with
                 // `The property has no set accessor`.
                 self.check_readonly_prop_assign(lhs, AccessPosition::of_assign_op(*op));
+                if !matches!(op, AssignOp::Assign) {
+                    self.check_combined_property_operation(lhs);
+                }
                 TypeRepr::Error(String::new())
             }
             ExprKind::HandleAssign { lhs, rhs } => {

@@ -601,7 +601,10 @@ impl SymbolTable {
                                 // The other STATE-shaped member. B115 fixed
                                 // both, so pooling only fields would rebuild
                                 // the half-blind asymmetry one layer up.
-                                modifiers: state_modifiers(prop.is_private, prop.is_protected),
+                                modifiers: DeclModifiers {
+                                    is_virtual_property: true,
+                                    ..state_modifiers(prop.is_private, prop.is_protected)
+                                },
                                 name: mname,
                                 kind: SymbolKind::Variable {
                                     type_name: type_text,
@@ -816,7 +819,10 @@ impl SymbolTable {
                 let type_text = prop.type_expr.span.text(source).to_string();
                 out.push(Symbol {
                     // As above: always false at file scope, threaded anyway.
-                    modifiers: state_modifiers(prop.is_private, prop.is_protected),
+                    modifiers: DeclModifiers {
+                        is_virtual_property: true,
+                        ..state_modifiers(prop.is_private, prop.is_protected)
+                    },
                     name,
                     kind: SymbolKind::Variable {
                         type_name: type_text,
