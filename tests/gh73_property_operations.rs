@@ -63,8 +63,11 @@ fn gh73_checks_each_combined_operator_and_accessor_spelling() {
             let source = format!("int get_Global() {{ return 0; }} void set_Global(int v) {{}}\nnamespace N {{ int get_Global() {{ return 0; }} void set_Global(int v) {{}} }}\nclass C {{ int get_P() {{ return 0; }} void set_P(int v) {{}} void Use(C@ c, Child@ child, array<C@>@ items) {{ {statement}; }} }}\nclass Child : C {{}}\nvoid Main() {{}}\n");
             let root = plugin(&source);
             let errors = check(&root, &[]);
-            assert_eq!(errors.len(), 1, "{statement}: {errors:?}");
-            assert_eq!(errors[0]["message"], "Invalid reference. Property accessors cannot be used in combined read/write operations", "{statement}");
+            // OP1.29.14 live matrix: increment/decrement reject, while
+            // every compound assignment is accepted for these targets.
+            let expected = usize::from(!operation.contains('='));
+            assert_eq!(errors.len(), expected, "{statement}: {errors:?}");
+            assert!(errors.iter().all(|d| d["message"] == "Invalid reference. Property accessors cannot be used in combined read/write operations"), "{statement}: {errors:?}");
         }
     }
 }
@@ -80,7 +83,7 @@ fn gh73_follows_accessors_declared_in_sibling_files() {
     let root = plugin("void Main() { N::Counter@ c; c.P++; N::Value += 1; }");
     fs::write(root.join("Types.as"), "namespace N { class Counter { int get_P() { return 0; } void set_P(int v) {} } int get_Value() { return 0; } void set_Value(int v) {} }").unwrap();
     let errors = check(&root, &[]);
-    assert_eq!(errors.len(), 2, "{errors:?}");
+    assert_eq!(errors.len(), 1, "{errors:?}");
     assert!(errors.iter().all(|d| d["message"] == "Invalid reference. Property accessors cannot be used in combined read/write operations"));
 }
 
@@ -89,7 +92,7 @@ fn gh73_property_block_syntax_retains_accessor_identity_across_files() {
     let root = plugin("void Main() { Counter c; c.P++; Settings::Value += 1; }");
     fs::write(root.join("Properties.as"), "class Counter { int backing; int P { get { return backing; } set { backing = value; } } }\nnamespace Settings { int backing; int Value { get { return backing; } set { backing = value; } } }\n").unwrap();
     let errors = check(&root, &[]);
-    assert_eq!(errors.len(), 2, "{errors:?}");
+    assert_eq!(errors.len(), 1, "{errors:?}");
     assert!(errors.iter().all(|d| d["message"] == "Invalid reference. Property accessors cannot be used in combined read/write operations"));
 }
 
@@ -110,6 +113,7 @@ fn gh73_absolute_globals_do_not_resolve_through_an_enclosing_namespace() {
         for operation in ["::P++", "--::P", "::P += 1"] {
             let root = plugin(&format!("{global} namespace N {{ {nested} void Use() {{ {operation}; }} }} void Main() {{}}"));
             let errors = check(&root, &[]);
+            let expected = if operation.contains('=') { 0 } else { expected };
             assert_eq!(errors.len(), expected, "{global}/{operation}: {errors:?}");
             assert!(errors.iter().all(|d| d["message"] == "Invalid reference. Property accessors cannot be used in combined read/write operations"));
         }
@@ -273,4 +277,28 @@ fn gh73_namespace_value_types_preserve_nearest_enum_validation() {
             .starts_with("No matching symbol 'E::X'"),
         "{errors:?}"
     );
+}
+
+#[test]
+fn gh73_known_qualified_core_types_keep_precedence_over_nested_names() {
+    let root = plugin("void Good(UI::InputTextCallbackData@ data) { data.SelectAll(); } namespace Qz { namespace UI { funcdef void InputTextCallback(int value); } UI::InputTextCallback@ callback = Good; void Use() { string text; UI::InputText(\"id\", text, 0, callback); } } void Main() {}");
+    let typedb = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .args(["check", "--format", "json", "--typedb-dir"])
+        .arg(typedb)
+        .arg(&*root)
+        .env("HOME", root.join("home"))
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .output()
+        .unwrap();
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).unwrap_or_else(|e| panic!("{e}: {output:?}"));
+    let errors: Vec<_> = report["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["severity"] == "error")
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(output.status.code(), Some(0));
 }

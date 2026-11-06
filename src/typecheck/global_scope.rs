@@ -2551,6 +2551,11 @@ impl<'a> GlobalScope<'a> {
             if let Some(global) = name.strip_prefix("::") {
                 return global.to_string();
             }
+            // A known qualified spelling resolves as written, including a
+            // Core type shadowed by a nested workspace declaration.
+            if name.contains("::") && self.names_a_known_type(&name) {
+                return name;
+            }
             let mut context = owner;
             while let Some((ns, _)) = context.rsplit_once("::") {
                 let candidate = format!("{ns}::{name}");
