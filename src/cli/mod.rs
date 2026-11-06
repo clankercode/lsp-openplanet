@@ -96,7 +96,8 @@ OPTIONS:
                         Any --define collapses the define matrix
                         (define_matrix in .openplanet-lsp.toml) back to a
                         single-combo run.
-    --typedb-dir DIR    Load OpenplanetCore.json and OpenplanetNext.json from DIR
+    --typedb-dir DIR    Load OpenplanetCore.json and the selected target's game DB
+                        from DIR (e.g. Openplanet4.json for MP4)
                         (plus Openplanet.h, if present)
     --openplanet-version V[,V...]
                         Check against these Openplanet versions instead of the
@@ -106,7 +107,7 @@ OPTIONS:
     --typedb-versions-dir DIR
                         Root of recorded typedb snapshots (one subdirectory
                         per version, each holding OpenplanetCore.json and
-                        OpenplanetNext.json)
+                        the matching target's game DB)
     --no-typedb         Run without Openplanet/Nadeo type database files
     --no-gitignore      Check .as files that .gitignore excludes. Discovery
                         honors .gitignore at or below the plugin root by
@@ -838,8 +839,12 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
             }]
         } else {
             let installed = config.core_json.as_deref().zip(config.game_json.as_deref());
-            let catalog = VersionCatalog::build(installed, options.typedb_versions_dir.as_deref())
-                .map_err(CliError::Check)?;
+            let catalog = VersionCatalog::build_for_target(
+                installed,
+                options.typedb_versions_dir.as_deref(),
+                &config.game_target,
+            )
+            .map_err(CliError::Check)?;
             let resolved = catalog
                 .resolve_targets(options.openplanet_version.as_deref())
                 .map_err(CliError::Check)?;
@@ -863,6 +868,13 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
                             TypeIndex::load(&entry.core_json, &entry.game_json).map_err(|e| {
                                 CliError::Check(format!("failed to load type database: {e}"))
                             })?;
+                        crate::typedb::catalog::validate_loaded_versions_for_target(
+                            &entry.core_json,
+                            &entry.game_json,
+                            index.versions(),
+                            &config.game_target,
+                        )
+                        .map_err(CliError::Check)?;
                         let notes = diffable
                             .then(|| catalog.notes_for_target(entry))
                             .transpose()
@@ -1486,7 +1498,10 @@ fn resolve_workspace_root(path: &Path) -> Result<PathBuf, CliError> {
 fn apply_typedb_dir(config: &mut LspConfig, typedb_dir: Option<&Path>) {
     if let Some(dir) = typedb_dir {
         config.core_json = Some(dir.join("OpenplanetCore.json"));
-        config.game_json = Some(dir.join("OpenplanetNext.json"));
+        config.game_json = Some(LspConfig::game_json_path_for_target(
+            dir,
+            &config.game_target,
+        ));
     }
 }
 
@@ -1499,9 +1514,16 @@ fn load_type_index(config: &LspConfig, no_typedb: bool) -> Result<Option<TypeInd
         return Ok(None);
     };
 
-    TypeIndex::load(core, game)
-        .map(Some)
-        .map_err(|e| CliError::Check(format!("failed to load type database: {e}")))
+    let index = TypeIndex::load(core, game)
+        .map_err(|e| CliError::Check(format!("failed to load type database: {e}")))?;
+    crate::typedb::catalog::validate_loaded_versions_for_target(
+        core,
+        game,
+        index.versions(),
+        &config.game_target,
+    )
+    .map_err(CliError::Check)?;
+    Ok(Some(index))
 }
 
 pub(crate) fn severity_label(severity: Option<DiagnosticSeverity>) -> &'static str {

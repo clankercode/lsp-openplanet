@@ -1338,11 +1338,13 @@ impl LanguageServer for Backend {
         // installed pair — a server must not refuse to start over a
         // config typo.
         let config = self.config.read().await;
-        let (resolved_pair, version_warning) = crate::typedb::catalog::resolve_single_pair(
-            config.core_json.as_deref().zip(config.game_json.as_deref()),
-            config.typedb_versions_dir.as_deref(),
-            config.openplanet_version.as_deref(),
-        );
+        let (resolved_pair, version_warning) =
+            crate::typedb::catalog::resolve_single_pair_for_target(
+                config.core_json.as_deref().zip(config.game_json.as_deref()),
+                config.typedb_versions_dir.as_deref(),
+                config.openplanet_version.as_deref(),
+                &config.game_target,
+            );
         if let Some(warning) = version_warning {
             tracing::warn!("{}", warning);
         }

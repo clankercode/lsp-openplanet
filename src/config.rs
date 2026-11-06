@@ -1480,7 +1480,7 @@ impl LspConfig {
     pub fn openplanet_folder_for_target(target: &str) -> Option<&'static str> {
         match target {
             "TMNEXT" => Some("OpenplanetNext"),
-            "MP4" | "MP40" | "MP41" => Some("OpenplanetMP4"),
+            "MP4" | "MP40" | "MP41" => Some("Openplanet4"),
             "TURBO" => Some("OpenplanetTurbo"),
             "UNITED" | "UNITED_FOREVER" => Some("OpenplanetUnited"),
             _ => None,
@@ -1493,10 +1493,34 @@ impl LspConfig {
     pub fn game_json_filename_for_target(target: &str) -> &'static str {
         match Self::openplanet_folder_for_target(target) {
             Some("OpenplanetNext") => "OpenplanetNext.json",
-            Some("OpenplanetMP4") => "OpenplanetMP4.json",
+            Some("Openplanet4") => "Openplanet4.json",
             Some("OpenplanetTurbo") => "OpenplanetTurbo.json",
             Some("OpenplanetUnited") => "OpenplanetUnited.json",
             _ => "OpenplanetNext.json",
+        }
+    }
+
+    /// Resolve a target's game dump within an explicit or discovered install.
+    /// MP4 ships as `Openplanet4.json`; accept the older configured spelling
+    /// too. A missing dump retains the canonical path for a useful load error.
+    pub fn game_json_path_for_target(dir: &Path, target: &str) -> PathBuf {
+        if matches!(target, "MP4" | "MP40" | "MP41") {
+            ["Openplanet4.json", "OpenplanetMP4.json"]
+                .iter()
+                .map(|name| dir.join(name))
+                .find(|path| path.is_file())
+                .unwrap_or_else(|| dir.join("Openplanet4.json"))
+        } else {
+            dir.join(Self::game_json_filename_for_target(target))
+        }
+    }
+
+    /// Search the real install name first, retaining the configured MP4 alias.
+    fn openplanet_folders_for_target(target: &str) -> Vec<&'static str> {
+        match Self::openplanet_folder_for_target(target) {
+            Some("Openplanet4") => vec!["Openplanet4", "OpenplanetMP4"],
+            Some(folder) => vec![folder],
+            None => Vec::new(),
         }
     }
 
@@ -1627,8 +1651,7 @@ impl LspConfig {
                 }
             }
             if config.game_json.is_none() {
-                let game_json_name = Self::game_json_filename_for_target(&config.game_target);
-                let p = op_dir.join(game_json_name);
+                let p = Self::game_json_path_for_target(op_dir, &config.game_target);
                 if p.exists() {
                     config.game_json = Some(p);
                 }
@@ -1908,7 +1931,8 @@ impl LspConfig {
     }
 
     fn auto_detect_for_target(&mut self, target: &str) {
-        let Some(folder) = Self::openplanet_folder_for_target(target) else {
+        let folders = Self::openplanet_folders_for_target(target);
+        if folders.is_empty() {
             // MP3 / NATIONS_FOREVER: no Openplanet build exists. Warn and
             // fall back to the TMNEXT layout (issue GH #45 table).
             eprintln!(
@@ -1916,20 +1940,16 @@ impl LspConfig {
                  falling back to the OpenplanetNext layout"
             );
             return;
-        };
-        // Windows-style path via HOME
-        if let Ok(home) = std::env::var("USERPROFILE") {
-            let p = PathBuf::from(&home).join(folder);
-            if p.exists() {
-                self.set_openplanet_dir(p, OpenplanetDirOrigin::AutoDetected);
-                return;
-            }
         }
-        // Linux / generic HOME
-        if let Ok(home) = std::env::var("HOME") {
-            let p = PathBuf::from(&home).join(folder);
-            if p.exists() {
-                self.set_openplanet_dir(p, OpenplanetDirOrigin::AutoDetected);
+        for var in ["USERPROFILE", "HOME"] {
+            if let Ok(home) = std::env::var(var) {
+                for folder in &folders {
+                    let p = PathBuf::from(&home).join(folder);
+                    if p.is_dir() {
+                        self.set_openplanet_dir(p, OpenplanetDirOrigin::AutoDetected);
+                        return;
+                    }
+                }
             }
         }
     }
@@ -1952,14 +1972,15 @@ impl LspConfig {
     }
 
     fn recheck_variant_folder(&mut self) {
-        let folder = match Self::openplanet_folder_for_target(&self.game_target) {
-            Some(f) => f,
-            None => return, // no-build targets already warned in auto_detect
-        };
+        let folders = Self::openplanet_folders_for_target(&self.game_target);
+        if folders.is_empty() {
+            return; // no-build targets already warned in auto_detect
+        }
         let current_matches = self
             .openplanet_dir
             .as_deref()
-            .is_some_and(|d| d.file_name().and_then(|n| n.to_str()) == Some(folder));
+            .and_then(|d| d.file_name().and_then(|n| n.to_str()))
+            .is_some_and(|folder| folders.contains(&folder));
         if current_matches {
             return;
         }
@@ -1970,10 +1991,12 @@ impl LspConfig {
         }
         for var in ["USERPROFILE", "HOME"] {
             if let Ok(home) = std::env::var(var) {
-                let p = PathBuf::from(&home).join(folder);
-                if p.exists() {
-                    self.set_openplanet_dir(p, OpenplanetDirOrigin::AutoDetected);
-                    return;
+                for folder in &folders {
+                    let p = PathBuf::from(&home).join(folder);
+                    if p.is_dir() {
+                        self.set_openplanet_dir(p, OpenplanetDirOrigin::AutoDetected);
+                        return;
+                    }
                 }
             }
         }
@@ -3154,7 +3177,7 @@ define_matrix_max_combinations = 32
         for t in ["MP4", "MP40", "MP41"] {
             assert_eq!(
                 LspConfig::openplanet_folder_for_target(t),
-                Some("OpenplanetMP4"),
+                Some("Openplanet4"),
                 "target {t}"
             );
         }
@@ -3186,7 +3209,7 @@ define_matrix_max_combinations = 32
         );
         assert_eq!(
             LspConfig::game_json_filename_for_target("MP4"),
-            "OpenplanetMP4.json"
+            "Openplanet4.json"
         );
         assert_eq!(
             LspConfig::game_json_filename_for_target("TURBO"),

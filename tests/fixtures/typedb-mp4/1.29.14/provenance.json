@@ -1,0 +1,27 @@
+{
+  "source_install": "/home/xertrov/Openplanet4",
+  "recorded": "2026-11-07",
+  "core_op": "1.29.14 (v4, Public, 6fd4200f)",
+  "game_op": "1.29.14",
+  "game_mp": "2019-11-20 04:50:52",
+  "files": [
+    {
+      "file": "OpenplanetCore.json",
+      "source": "/home/xertrov/Openplanet4/OpenplanetCore.json",
+      "bytes": 688878,
+      "sha256": "0c629b9a24ce314a643c42d1e35137089977d50ffeea7eb1da42bf86b28c6733"
+    },
+    {
+      "file": "Openplanet4.json",
+      "source": "/home/xertrov/Openplanet4/Openplanet4.json",
+      "bytes": 1014960,
+      "sha256": "835a34ae5bfc99e0e56363c3952b2068ecf96e401d6c6f7414588379b4d71ded"
+    },
+    {
+      "file": "Openplanet.h",
+      "source": "/home/xertrov/Openplanet4/Openplanet.h",
+      "bytes": 754667,
+      "sha256": "c243367bcf70bb5bdcd79dd7c35aedeb43e02a11efcbcf22410a11640a027c8a"
+    }
+  ]
+}
