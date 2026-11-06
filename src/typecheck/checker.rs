@@ -3062,12 +3062,8 @@ impl<'a> Checker<'a> {
     /// the resolver makes — rather than a second lookup that could disagree
     /// with it about what the set contains.
     ///
-    /// Credits and types the call EXACTLY as the `has_global_ident` arm it
-    /// stands in front of: same `record_value_use_variants`, same
-    /// `TypeRepr::Error` sentinel. Returning the resolver's own type instead
-    /// would be a second, unmeasured change riding along on this one — the
-    /// unique-overload winner's return type would start flowing into member
-    /// chains and hover, which is not what this ticket measured.
+    /// Resolve the same overload set used for argument checking and retain
+    /// a unique winner's contextual return type for downstream member chains.
     fn try_workspace_overload_set_call(
         &mut self,
         display_name: &str,
@@ -3079,14 +3075,13 @@ impl<'a> Checker<'a> {
             return None;
         }
         self.record_value_use_variants(qualified);
-        self.resolve_workspace_function_call(
+        Some(self.resolve_workspace_function_call(
             display_name,
             qualified,
             args,
             callee_span,
             TypeRepr::Error(String::new()),
-        );
-        Some(TypeRepr::Error(String::new()))
+        ))
     }
 
     fn resolve_workspace_function_call(
@@ -6557,11 +6552,27 @@ impl<'a> Checker<'a> {
                     // `namespace Repro`, a written `StatusKind::B` refers
                     // to `Repro::StatusKind::B` in the pooled table.
                     for depth in (0..=self.namespace_stack.len()).rev() {
+                        if depth > 0 && path.span.text(self.source).starts_with("::") {
+                            continue;
+                        }
                         let candidate = if depth == 0 {
                             qual.clone()
                         } else {
                             format!("{}::{}", self.namespace_stack[..depth].join("::"), qual)
                         };
+                        // A nearest enum qualifier owns its member lookup;
+                        // a miss must not fall back to an outer enum/value.
+                        if candidate
+                            .rsplit_once("::")
+                            .is_some_and(|(owner, _)| self.scope.enum_member_names(owner).is_some())
+                        {
+                            self.record_value_use_variants(&candidate);
+                            return self.enum_member_type(&qual, expr.span);
+                        }
+                        if let Some(ty) = self.scope.lookup_global_value_type(&candidate) {
+                            self.record_value_use_variants(&candidate);
+                            return ty;
+                        }
                         if self.scope.has_global_ident(&candidate) {
                             self.record_value_use_variants(&candidate);
                             break;

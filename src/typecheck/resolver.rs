@@ -133,6 +133,29 @@ impl<'a> TypeResolver<'a> {
             };
         }
 
+        // GH #73: preserve the exact lexical workspace type before the
+        // global/tail shadowing lookup can erase its declaration context.
+        // A real funcdef remains callable; typedefs retain named-type status.
+        if !qualified.contains("::") && !qname.span.text(self.source).starts_with("::") {
+            for depth in (1..=self.namespace_stack.len()).rev() {
+                let candidate =
+                    format!("{}::{qualified}", self.namespace_stack[..depth].join("::"));
+                for symbol in self.scope.lookup_workspace(&candidate) {
+                    use crate::symbols::scope::SymbolKind;
+                    match symbol.kind {
+                        SymbolKind::Funcdef {
+                            is_typedef: false, ..
+                        } => return TypeRepr::Funcdef(candidate),
+                        SymbolKind::Class { .. }
+                        | SymbolKind::Interface { .. }
+                        | SymbolKind::Enum { .. }
+                        | SymbolKind::Funcdef { .. } => return TypeRepr::Named(candidate),
+                        _ => {}
+                    }
+                }
+            }
+        }
+
         // GH #38 / B073: a plugin's own TYPE declaration shadows the engine
         // symbol of the same name. The two lookups immediately below both
         // answer from the ENGINE — `lookup_funcdef` walks workspace symbols
