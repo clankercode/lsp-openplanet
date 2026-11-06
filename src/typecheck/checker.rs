@@ -5160,10 +5160,24 @@ impl<'a> Checker<'a> {
                     self.walk_args(args);
                     return TypeRepr::Error(String::new());
                 }
-                // Emit an undefined-ident diagnostic on the callee span.
+                // GH #27: only suggest a measured migration after ordinary
+                // resolution has failed, and only when this target provides
+                // its successor. A workspace/local declaration wins above.
+                let relocation = removed_api_hint(&name).filter(|successor| {
+                    self.scope
+                        .external()
+                        .is_some_and(|idx| idx.lookup_function(successor).is_some())
+                });
+                let kind = match relocation {
+                    Some(successor) => TypeDiagnosticKind::NoMatchingSymbol {
+                        qualified: name.clone(),
+                        hint: Some(SymbolHint::Relocation(successor.to_string())),
+                    },
+                    None => TypeDiagnosticKind::UndefinedIdentifier(name.clone()),
+                };
                 self.diagnostics.push(TypeDiagnostic {
                     span: callee.span,
-                    kind: TypeDiagnosticKind::UndefinedIdentifier(name.clone()),
+                    kind,
                 });
                 self.walk_args(args);
                 TypeRepr::Error(name)
@@ -6504,6 +6518,8 @@ fn is_integer(p: PrimitiveType) -> bool {
 /// `UI::*` — the namespace is absent from the 1.29.5 typedb entirely.
 fn removed_api_hint(qual: &str) -> Option<&'static str> {
     match qual {
+        "StripFormatCodes" => Some("Text::StripFormatCodes"),
+        "ColoredString" => Some("Text::OpenplanetFormatCodes"),
         "Draw::GetWidth" => Some("Display::GetWidth"),
         "Draw::GetHeight" => Some("Display::GetHeight"),
         "Draw::MeasureString" => Some("UI::MeasureString"),
