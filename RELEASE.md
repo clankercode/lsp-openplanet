@@ -25,8 +25,8 @@ One git tag (`vX.Y.Z`) drives distribution via
 |------------------|-----------------------------|-----------------------------|-----------|
 | ubuntu-22.04     | x86_64-unknown-linux-gnu    | openplanet-lsp-linux-x64    | `.tar.gz` |
 | ubuntu-24.04-arm | aarch64-unknown-linux-gnu   | openplanet-lsp-linux-arm64  | `.tar.gz` |
-| macos-14         | x86_64-apple-darwin (cross) | openplanet-lsp-darwin-x64   | `.tar.gz` |
-| macos-14         | aarch64-apple-darwin        | openplanet-lsp-darwin-arm64 | `.tar.gz` |
+| macos-15         | x86_64-apple-darwin (cross) | openplanet-lsp-darwin-x64   | `.tar.gz` |
+| macos-15         | aarch64-apple-darwin        | openplanet-lsp-darwin-arm64 | `.tar.gz` |
 | windows-latest   | x86_64-pc-windows-msvc      | openplanet-lsp-win32-x64    | `.zip`    |
 | windows-11-arm   | aarch64-pc-windows-msvc     | openplanet-lsp-win32-arm64  | `.zip`    |
 
@@ -485,6 +485,7 @@ Do **not** treat CI’s auto-generated release notes as the finished product.
 | Release job: Cargo version ≠ tag | `bump-version.sh`, retag / new patch |
 | `npm publish` ENEEDAUTH / 401 | Trusted publisher missing/wrong: `npm trust list <pkg>`; workflow file must be `release.yml`; repo `clankercode/lsp-openplanet`; job needs `id-token: write` + Node 24 |
 | Optional platform package missing after install | Install `openplanet-lsp-<platform>@x.y.z` or use GH binary |
+| Retired macOS runner reports unsupported configuration | Use a supported arm64 label such as `macos-15` for both Darwin targets; macOS 14 retired on November 2, 2026. See [runner images](https://github.com/actions/runner-images#available-images) |
 | `windows-11-arm` runner unavailable | Adjust matrix in `release.yml` **and this doc** |
 | Release body still auto-generated only | You skipped step 5 — run `gh release edit` |
 | Changelog empty / “various fixes” only | Expand from `git log` since previous tag; be specific |

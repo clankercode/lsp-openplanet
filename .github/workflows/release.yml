@@ -147,13 +147,13 @@ jobs:
             npm_pkg: openplanet-lsp-linux-arm64
             archive: tar.gz
             bin_name: openplanet-lsp
-          # Cross-compile Intel mac from arm64 runners (macos-13 is scarce/deprecated).
-          - os: macos-14
+          # Cross-compile Intel mac from supported arm64 runners; macos-14 retired in November 2026.
+          - os: macos-15
             target: x86_64-apple-darwin
             npm_pkg: openplanet-lsp-darwin-x64
             archive: tar.gz
             bin_name: openplanet-lsp
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             npm_pkg: openplanet-lsp-darwin-arm64
             archive: tar.gz

@@ -13,7 +13,9 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
-## [0.8.1] - 2026-11-07
+## [0.8.2] - 2026-11-07
+
+Version 0.8.1 was not published: retired macOS 14 runners blocked its release build.
 
 ### Fixed
 - **ManiaPlanet 4 API loading** (#35) — MP4, MP40 and MP41 select authentic
@@ -53,7 +55,8 @@ GitHub Release body to match this section (gh release edit).
   emit `DEPENDENCY_DIPS___DEV`, matching the live Openplanet define.
 
 ### Distribution
-- The `v0.8.1` tag publishes GitHub binary archives for Linux, macOS and
+- macOS release builds use supported `macos-15` arm64 runners for both Darwin targets.
+- The `v0.8.2` tag publishes GitHub binary archives for Linux, macOS and
   Windows on x64 and arm64, all seven npm packages, and the crates.io crate.
 
 ## [0.8.0] - 2026-10-15
