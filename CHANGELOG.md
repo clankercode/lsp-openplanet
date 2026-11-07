@@ -13,14 +13,48 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-07
+
 ### Fixed
+- **ManiaPlanet 4 API loading** (#35) — MP4, MP40 and MP41 select authentic
+  `Openplanet4` data across CLI checks, recorded versions, type-database
+  commands and LSP initialization. Legacy `OpenplanetMP4` names remain
+  supported. Missing, ambiguous or mismatched game/version data reports an
+  explicit error instead of silently checking against another target.
+- **Incomplete dependency checks and editor reloads** (#74) — missing or
+  unreadable dependency exports explain why checking is incomplete. Repairing
+  manifests, exports or dependency archives refreshes the workspace and
+  republishes diagnostics while preserving configuration and source filters.
+- **Missing namespace diagnostics** (#70, #71) — complete modules now report
+  calls through absent namespaces, including installed but undeclared plugin
+  dependencies and newly discovered source files. Incomplete dependency
+  closures retain their conservative diagnostic behavior.
+- **Duplicate declarations** (#75) — repeated fields and globals are reported
+  at the later declaration, with compilation ownership respected across files,
+  dependency re-exports, aliases and plugin archives.
+- **Interface signature aliases** (#72) — equivalent primitive aliases match
+  when checking interface implementations, including qualified argument forms.
+- **Property increment and decrement operators** (#73) — prefix and postfix
+  `++` / `--` on script properties report `Invalid reference`, matching live
+  Openplanet 1.29.14 measurements. Compound assignments with both accessors
+  remain accepted; receiver lookup preserves namespaces and inheritance.
+- **Signed/unsigned comparison locations and quick fixes** (#68) — warnings
+  point at the comparison operator, including `==` and `!=`, while cast
+  actions continue to replace only the selected operand.
+- **API relocation hints** (#27) — unresolved bare `StripFormatCodes` and
+  `ColoredString` calls suggest `Text::StripFormatCodes` and
+  `Text::OpenplanetFormatCodes` when those replacements exist in the selected
+  API database. Quick fixes replace only the callee and respect shadowing.
 - **Virtual property self-access inside accessors** (B185) — reading or
   writing `P` (or `this.P`) inside `get_P` / `set_P` (or property-syntax
-  accessors) now reports `No matching symbol 'P'`, matching Openplanet.
+  accessors) reports `No matching symbol 'P'`, matching Openplanet.
   Explicit `get_P()` / `set_P()` calls remain legal.
 - **Dependency defines sanitize `+`** (B186) — plugin ids like `dips++-dev`
-  now emit `DEPENDENCY_DIPS___DEV`, matching the live Openplanet define
-  (previously `+` was preserved and `#if` branches stayed inactive).
+  emit `DEPENDENCY_DIPS___DEV`, matching the live Openplanet define.
+
+### Distribution
+- The `v0.8.1` tag publishes GitHub binary archives for Linux, macOS and
+  Windows on x64 and arm64, all seven npm packages, and the crates.io crate.
 
 ## [0.8.0] - 2026-10-15
 
